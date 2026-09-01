@@ -1,0 +1,11 @@
+{
+  "name": "Community P2P Rental & Fractional Sharing Marketplace",
+  "description": "P2P rental and fractional marketplace with Neon PostgreSQL, PostGIS discovery, escrow payments, Better Auth authentication, executive admin bootstrap, digital condition logging, private trust groups, and AwehChat messaging integration.",
+  "requestFramePermissions": [
+    "geolocation",
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

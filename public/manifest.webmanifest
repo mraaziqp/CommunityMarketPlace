@@ -1,0 +1,49 @@
+{
+  "name": "ShareHub — Community P2P Rental & Fractional Sharing Marketplace",
+  "short_name": "ShareHub",
+  "description": "Hyper-local fractional appliance co-ops, power tool library, and physical asset sharing within walking distance.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#f8fafc",
+  "theme_color": "#0f172a",
+  "categories": ["lifestyle", "shopping", "utilities", "productivity"],
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Explore Listings",
+      "short_name": "Explore",
+      "url": "/?tab=explore"
+    },
+    {
+      "name": "My Quotas & Activity",
+      "short_name": "Activity",
+      "url": "/?tab=activity"
+    },
+    {
+      "name": "Trust Circles",
+      "short_name": "Circles",
+      "url": "/?tab=circles"
+    }
+  ]
+}
