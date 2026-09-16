@@ -41,11 +41,13 @@ This guide provides step-by-step instructions for hosting the **CommunityMarketP
    npm ci
    npm run build
 
-   # Sync root files (HTML, icons, manifests)
-   aws s3 sync dist/ s3://<YOUR_BUCKET_NAME> --delete --cache-control "public, max-age=0, must-revalidate"
+   # Hashed assets first, kept forever, so a client still holding the old
+   # index.html can fetch the chunks it references.
+   aws s3 sync dist/assets/ s3://<YOUR_BUCKET_NAME>/assets --cache-control "public, max-age=31536000, immutable"
 
-   # Sync immutable hashed JavaScript and CSS assets
-   aws s3 sync dist/assets/ s3://<YOUR_BUCKET_NAME>/assets --delete --cache-control "public, max-age=31536000, immutable"
+   # Then the shell and public files. --delete is scoped so it cannot remove
+   # the assets synced above.
+   aws s3 sync dist/ s3://<YOUR_BUCKET_NAME> --delete --exclude "assets/*" --cache-control "public, max-age=0, must-revalidate"
    ```
 
 4. **Invalidate the CloudFront Cache**:
@@ -61,16 +63,69 @@ This guide provides step-by-step instructions for hosting the **CommunityMarketP
 
 ## Option 2: Deploy with AWS Amplify Hosting (1-Click Git Integration)
 
+### If your Amplify build is already failing
+
+A build that dies during provisioning with:
+
+```
+CustomerError: Cannot read 'next' version in package.json.
+If you are using monorepo, please ensure that AMPLIFY_MONOREPO_APP_ROOT is set correctly.
+```
+
+is **not** a problem with the repository. The build never got as far as
+`amplify.yml`. The app was created in Amplify as a Next.js SSR app
+(`platform: WEB_COMPUTE`), so Amplify looks for a `next` dependency during
+provisioning. ShareHub is a Vite SPA and has none.
+
+It is also not a monorepo problem, so setting `AMPLIFY_MONOREPO_APP_ROOT` will
+not help. Switch the app to static hosting instead:
+
+```bash
+./aws/amplify-configure.sh <APP_ID> <REGION>
+```
+
+That script sets `platform` to `WEB` and installs the SPA rewrite rule. Find
+`<APP_ID>` in the Amplify console URL (`.../apps/d1a2b3c4d5e6f7/...`).
+
+To do it by hand in the console instead: **App settings > General settings >
+Edit**, set **Platform** to **Web**, save, then redeploy.
+
+Either way, trigger a fresh build afterwards — the failed one produced no
+artifacts:
+
+```bash
+aws amplify start-job --app-id <APP_ID> --branch-name main --job-type RELEASE --region <REGION>
+```
+
+### Creating the app from scratch
+
 1. Push your repository to GitHub / GitLab / Bitbucket.
 2. Open the **[AWS Amplify Console](https://console.aws.amazon.com/amplify)**.
 3. Click **Create new app** > **Host web app**.
-4. Connect your GitHub repository (`mraaziqp/CommunityMarketPlace`) and select the `main` branch.
-5. AWS Amplify will automatically detect the provided [`amplify.yml`](./amplify.yml) file.
-6. Under **Environment variables**, add:
-   - `VITE_APP_URL`: Your Amplify app domain (or custom domain).
-   - `VITE_GEMINI_API_KEY`: Your Gemini API key.
-   - `DATABASE_URL`: Your Neon Postgres connection string.
-7. Click **Save and deploy**. Amplify will build and deploy on every git push.
+4. Connect the repository (`mraaziqp/CommunityMarketPlace`) and the `main` branch.
+5. Confirm the detected framework is **Web** / **Vite**, not Next.js. This is the
+   single setting that causes the provisioning failure above.
+6. Amplify picks up [`amplify.yml`](./amplify.yml) for the build and headers.
+7. **Do not add environment variables.** The app reads none, and every value
+   passed to a Vite build is readable in the shipped bundle. See
+   [`.env.production.example`](./.env.production.example).
+8. Click **Save and deploy**.
+
+### Required: SPA rewrite rule
+
+Amplify serves files, so `/admin` and any other deep link 404s until every
+non-asset path is rewritten to the app shell. `aws/amplify-configure.sh` sets
+this for you. To add it manually under **Hosting > Rewrites and redirects**:
+
+Source (copy this verbatim — the escaping matters):
+
+```
+</^[^.]+$|\.(?!(css|gif|ico|jpg|jpeg|js|mjs|png|txt|svg|webp|avif|woff|woff2|ttf|eot|map|json|webmanifest)$)([^.]+$)/>
+```
+
+Target: `/index.html` &nbsp;&nbsp; Type: `200 (Rewrite)`
+
+Without it the PWA still loads at `/`, but a refresh on any other path fails.
 
 ---
 
@@ -138,6 +193,6 @@ To enable automated deployments on every `git push origin main`:
    - `AWS_REGION`: e.g. `us-east-1`.
    - `AWS_S3_BUCKET_NAME`: Your target S3 bucket name.
    - `AWS_CLOUDFRONT_DISTRIBUTION_ID`: Your CloudFront distribution ID.
-   - `VITE_GEMINI_API_KEY`: Your Google Gemini API Key.
-   - `DATABASE_URL`: Your Postgres connection string.
+
+   The build itself needs no application secrets — only the AWS credentials above.
 3. Once set, every push to `main` will automatically build the app, upload assets to S3 with cache controls, and invalidate CloudFront.

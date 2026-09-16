@@ -1,5 +1,3 @@
-'use server';
-
 import { memoryStore } from '../db';
 import * as schema from '../db/schema';
 import {
@@ -10,9 +8,22 @@ import {
 
 /**
  * ============================================================================
- * MEDIA STORAGE PIPELINE (S3 / GOOGLE CLOUD STORAGE PRE-SIGNED URLS)
- * Generates decoupled, zero-server-bottleneck pre-signed upload URLs.
- * Images upload directly from the user's browser to the object bucket.
+ * MEDIA STORAGE PIPELINE — CLIENT-SIDE IMAGE INTAKE
+ *
+ * ShareHub is a static app with no server and no object bucket, so there is
+ * nothing to pre-sign against. Listing photos are instead normalised in the
+ * browser: validated, downscaled on a canvas, and re-encoded as a data URL
+ * that is stored alongside the listing.
+ *
+ * Downscaling is not cosmetic. A raw phone photo is several megabytes, and the
+ * store is persisted to localStorage, whose quota is around 5MB in total. An
+ * image bounded to MAX_IMAGE_DIMENSION at JPEG quality 0.72 lands in the low
+ * hundreds of kilobytes, which keeps a realistic listing well inside budget
+ * and, unlike an object URL, still resolves after a reload.
+ *
+ * To move to real bucket storage later, replace prepareListingImage with a
+ * call that PUTs to a genuinely pre-signed URL issued by a server; every
+ * caller already treats the result as an opaque URL.
  * ============================================================================
  */
 
@@ -25,77 +36,125 @@ const ALLOWED_MIME_TYPES = [
 
 const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024; // 10MB
 
+const MAX_IMAGE_DIMENSION = 1280;
+const OUTPUT_QUALITY = 0.72;
+const OUTPUT_MIME = 'image/jpeg';
+
 /**
- * Generates a pre-signed PUT upload URL for direct browser-to-bucket upload.
+ * Validates an image the user picked, without reading its contents.
+ * Kept separate so the UI can reject a bad file before any decoding work.
  */
-export async function getSignedUploadUrl(
+export function validateImageFile(
   request: SignedUploadUrlRequest
-): Promise<SignedUploadUrlResponse> {
-  try {
-    const { filename, contentType, fileSizeBytes, listingId } = request;
+): { valid: true } | { valid: false; error: string } {
+  const { contentType, fileSizeBytes } = request;
 
-    // 1. Validate MIME type
-    if (!ALLOWED_MIME_TYPES.includes(contentType.toLowerCase())) {
-      return {
-        success: false,
-        uploadUrl: '',
-        publicUrl: '',
-        key: '',
-        expiresInSeconds: 0,
-        error: `Unsupported format (${contentType}). Please upload JPEG, PNG, WebP, or AVIF.`,
-      };
-    }
-
-    // 2. Validate payload size
-    if (fileSizeBytes > MAX_FILE_SIZE_BYTES) {
-      return {
-        success: false,
-        uploadUrl: '',
-        publicUrl: '',
-        key: '',
-        expiresInSeconds: 0,
-        error: `File exceeds maximum allowed size (10MB).`,
-      };
-    }
-
-    // 3. Generate sanitized S3 / GCS object key
-    const extension = filename.split('.').pop() || 'jpg';
-    const timestamp = Date.now();
-    const randomEntropy = Math.random().toString(36).substring(2, 10);
-    const sanitizedPrefix = listingId ? `listings/${listingId}` : 'listings/temp';
-    const objectKey = `${sanitizedPrefix}/${timestamp}-${randomEntropy}.${extension}`;
-
-    // Bucket configuration from environment or high-availability storage fallback
-    const bucketName = process.env.STORAGE_BUCKET_NAME || 'sharehub-media-production';
-    const storageEndpoint = process.env.STORAGE_ENDPOINT || 'https://storage.googleapis.com';
-
-    // In production with real GCS/S3 credentials:
-    // const command = new PutObjectCommand({ Bucket: bucketName, Key: objectKey, ContentType: contentType });
-    // const uploadUrl = await getSignedUrl(s3Client, command, { expiresIn: 900 });
-
-    const publicUrl = `${storageEndpoint}/${bucketName}/${objectKey}`;
-    const uploadUrl = `${storageEndpoint}/${bucketName}/${objectKey}?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Credential=sharehub-service-account&X-Goog-Date=${timestamp}&X-Goog-Expires=900&X-Goog-SignedHeaders=content-type%3Bhost&X-Goog-Signature=mock_signed_hex_token`;
-
+  if (!ALLOWED_MIME_TYPES.includes((contentType || '').toLowerCase())) {
     return {
-      success: true,
-      uploadUrl,
-      publicUrl,
-      key: objectKey,
-      headers: {
-        'Content-Type': contentType,
-        'x-amz-acl': 'public-read',
-      },
-      expiresInSeconds: 900, // 15 minutes validity
+      valid: false,
+      error: `Unsupported format (${contentType || 'unknown'}). Please upload JPEG, PNG, WebP, or AVIF.`,
     };
-  } catch (error: any) {
-    console.error('Error generating signed upload URL:', error);
+  }
+
+  if (fileSizeBytes > MAX_FILE_SIZE_BYTES) {
+    return { valid: false, error: 'File exceeds maximum allowed size (10MB).' };
+  }
+
+  return { valid: true };
+}
+
+/** Builds the stable object key a listing photo would occupy in a bucket. */
+function buildObjectKey(filename: string, listingId?: string): string {
+  const extension = (filename.split('.').pop() || 'jpg').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const timestamp = Date.now();
+  const randomEntropy = Math.random().toString(36).substring(2, 10);
+  const prefix = listingId ? `listings/${listingId}` : 'listings/temp';
+  return `${prefix}/${timestamp}-${randomEntropy}.${extension || 'jpg'}`;
+}
+
+/** Decodes a File into an <img> via an object URL, always revoking the URL. */
+function decodeImage(file: File): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const objectUrl = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      resolve(img);
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error('That file could not be read as an image.'));
+    };
+    img.src = objectUrl;
+  });
+}
+
+/**
+ * Validates, downscales and encodes a picked file into a storable data URL.
+ */
+export async function prepareListingImage(
+  file: File,
+  listingId?: string
+): Promise<SignedUploadUrlResponse> {
+  const key = buildObjectKey(file.name, listingId);
+
+  const validation = validateImageFile({
+    filename: file.name,
+    contentType: file.type || 'image/jpeg',
+    fileSizeBytes: file.size,
+    listingId,
+  });
+
+  if (validation.valid === false) {
     return {
       success: false,
       uploadUrl: '',
       publicUrl: '',
       key: '',
       expiresInSeconds: 0,
-      error: error.message || 'Failed to generate pre-signed upload URL.',
+      error: validation.error,
+    };
+  }
+
+  try {
+    const img = await decodeImage(file);
+
+    const scale = Math.min(1, MAX_IMAGE_DIMENSION / Math.max(img.width, img.height));
+    const width = Math.max(1, Math.round(img.width * scale));
+    const height = Math.max(1, Math.round(img.height * scale));
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('Image processing is unavailable in this browser.');
+
+    // Flatten onto white: source PNG/WebP transparency would otherwise go black
+    // once re-encoded as JPEG.
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, width, height);
+    ctx.drawImage(img, 0, 0, width, height);
+
+    const dataUrl = canvas.toDataURL(OUTPUT_MIME, OUTPUT_QUALITY);
+
+    return {
+      success: true,
+      uploadUrl: dataUrl,
+      publicUrl: dataUrl,
+      key,
+      headers: { 'Content-Type': OUTPUT_MIME },
+      expiresInSeconds: 0,
+    };
+  } catch (error: any) {
+    console.error('Error preparing listing image:', error);
+    return {
+      success: false,
+      uploadUrl: '',
+      publicUrl: '',
+      key: '',
+      expiresInSeconds: 0,
+      error: error?.message || 'Failed to process the selected image.',
     };
   }
 }

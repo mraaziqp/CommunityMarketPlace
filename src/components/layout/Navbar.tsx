@@ -27,6 +27,8 @@ export interface NavbarProps {
   onOpenArchitecture: () => void;
   onOpenCreateListing: () => void;
   onOpenTrustGroups?: () => void;
+  onOpenChat?: () => void;
+  unreadMessagesCount?: number;
   currentUser: UserModel | null;
   onOpenAuth: () => void;
   onSignOut: () => void;

@@ -9,13 +9,14 @@
  * ============================================================================
  */
 
-const CACHE_NAME = 'sharehub-cache-v1';
+const CACHE_NAME = 'sharehub-cache-v2';
 const PRECACHE_ASSETS = [
   '/',
   '/index.html',
   '/manifest.webmanifest',
-  '/manifest.json',
   '/icons/icon.svg',
+  '/icons/icon-192.png',
+  '/icons/icon-512.png',
 ];
 
 // 1. Install Event: Precache App Shell
@@ -24,9 +25,15 @@ self.addEventListener('install', (event) => {
     caches
       .open(CACHE_NAME)
       .then((cache) => {
-        return cache.addAll(PRECACHE_ASSETS).catch((err) => {
-          console.warn('[Service Worker] Precache asset note:', err);
-        });
+        // addAll is atomic: one 404 discards the whole precache. Add each
+        // asset on its own so a single missing file cannot empty the shell.
+        return Promise.all(
+          PRECACHE_ASSETS.map((asset) =>
+            cache.add(asset).catch((err) => {
+              console.warn('[Service Worker] Skipped precaching', asset, err);
+            })
+          )
+        );
       })
       .then(() => self.skipWaiting())
   );

@@ -30,6 +30,31 @@ export function usePwaInstall() {
   useEffect(() => {
     if (typeof window === 'undefined') return;
 
+    // Register the service worker first. It has to happen before the
+    // standalone check below returns early, because an installed app running
+    // standalone is precisely the case that needs the offline shell. React
+    // effects also run after 'load' has already fired, so waiting for that
+    // event would mean the registration never happens at all.
+    let cancelled = false;
+
+    const registerServiceWorker = () => {
+      if (cancelled || !('serviceWorker' in navigator)) return;
+      navigator.serviceWorker
+        .register('/sw.js')
+        .then((registration) => {
+          console.log('[PWA] Service Worker registered with scope:', registration.scope);
+        })
+        .catch((err) => {
+          console.warn('[PWA] Service Worker registration note:', err);
+        });
+    };
+
+    if (document.readyState === 'complete') {
+      registerServiceWorker();
+    } else {
+      window.addEventListener('load', registerServiceWorker, { once: true });
+    }
+
     // Check if already in standalone display mode
     const isStandalone =
       window.matchMedia('(display-mode: standalone)').matches ||
@@ -38,27 +63,16 @@ export function usePwaInstall() {
 
     if (isStandalone) {
       setIsInstalled(true);
-      return;
+      return () => {
+        cancelled = true;
+        window.removeEventListener('load', registerServiceWorker);
+      };
     }
 
     // Check session dismissal
     const dismissedSession = sessionStorage.getItem('sharehub_pwa_dismissed');
     if (dismissedSession === 'true') {
       setIsDismissed(true);
-    }
-
-    // Register Service Worker
-    if ('serviceWorker' in navigator) {
-      window.addEventListener('load', () => {
-        navigator.serviceWorker
-          .register('/sw.js')
-          .then((registration) => {
-            console.log('[PWA] Service Worker registered with scope:', registration.scope);
-          })
-          .catch((err) => {
-            console.warn('[PWA] Service Worker registration note:', err);
-          });
-      });
     }
 
     // Handle beforeinstallprompt
@@ -82,6 +96,8 @@ export function usePwaInstall() {
 
     // Clean up event listeners on unmount
     return () => {
+      cancelled = true;
+      window.removeEventListener('load', registerServiceWorker);
       window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
       window.removeEventListener('appinstalled', handleAppInstalled);
     };
