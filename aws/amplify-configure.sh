@@ -52,19 +52,36 @@ echo "  Current platform: ${CURRENT_PLATFORM}"
 
 # Anything that is not an asset request falls through to the SPA shell. The
 # negative lookahead lists the extensions that must keep being served as files.
+# Single quotes keep this exactly as written — it is a regex, not shell.
 SPA_REWRITE_SOURCE='</^[^.]+$|\.(?!(css|gif|ico|jpg|jpeg|js|mjs|png|txt|svg|webp|avif|woff|woff2|ttf|eot|map|json|webmanifest)$)([^.]+$)/>'
+
+# JSON has no \. escape, so the lone backslash in that pattern has to be
+# doubled before it can go into a JSON string. Doing it with a substitution
+# rather than by hand-typing \\. keeps the pattern above readable and survives
+# heredocs, which do not reliably preserve a literal double backslash.
+SPA_REWRITE_JSON="${SPA_REWRITE_SOURCE//\\/\\\\}"
+
+RULES_FILE="$(mktemp)"
+trap 'rm -f "$RULES_FILE"' EXIT
+
+printf '[{"source": "%s", "target": "/index.html", "status": "200"}]\n' \
+  "$SPA_REWRITE_JSON" > "$RULES_FILE"
+
+# Fail here with a clear message rather than letting the AWS CLI reject the
+# payload with something opaque.
+for interpreter in python3 python; do
+  if command -v "$interpreter" >/dev/null 2>&1; then
+    "$interpreter" -c "import json,sys; json.load(open(sys.argv[1]))" "$RULES_FILE" \
+      || { echo "Generated rewrite rule is not valid JSON:" >&2; cat "$RULES_FILE" >&2; exit 1; }
+    break
+  fi
+done
 
 aws amplify update-app \
   --app-id "$APP_ID" \
   --region "$REGION" \
   --platform WEB \
-  --custom-rules "[
-    {
-      \"source\": \"${SPA_REWRITE_SOURCE}\",
-      \"target\": \"/index.html\",
-      \"status\": \"200\"
-    }
-  ]" \
+  --custom-rules "file://${RULES_FILE}" \
   --query 'app.{name:name,platform:platform,rules:customRules}' \
   --output json
 
