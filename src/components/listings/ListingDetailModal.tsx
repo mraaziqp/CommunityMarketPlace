@@ -248,7 +248,7 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
                   <a
                     id="chat-awehchat-detail-btn"
                     href={generateAwehChatLink(
-                      listing.owner.id || listing.ownerId || 'usr_host',
+                      listing.owner?.id || 'usr_host',
                       listing.id,
                       listing.title,
                       {

@@ -1,69 +1,226 @@
-import { neon, neonConfig } from '@neondatabase/serverless';
-import { drizzle } from 'drizzle-orm/neon-http';
 import * as schema from './schema';
-import { eq, and, sql } from 'drizzle-orm';
 
 /**
  * ============================================================================
- * SHAREHUB DATABASE CLIENT — STATELESS NEON SERVERLESS POSTGRESQL & DRIZZLE ORM
- * 
- * Performance & Connection Safety Guarantees:
- * 1. Stateless Edge HTTP Driver: Queries execute over lightweight HTTPS payloads (neon()),
- *    preventing TCP/WebSocket connection pool exhaustion in serverless edge/lambda environments.
- * 2. Pooler Endpoint & SSL Enforcement: Automatically normalizes database connection strings
- *    to include '?sslmode=require' and pooler flags.
- * 3. Connection Cache: Configures neonConfig.fetchConnectionCache = true for low-latency reuse.
- * 4. Zero-Leak Fallback Memory Engine: Provides transactional snapshot rollbacks for local dev/preview.
+ * SHAREHUB DATA LAYER — BROWSER-NATIVE PERSISTENT STORE
+ *
+ * ShareHub ships as a static single-page app (S3/CloudFront via AWS Amplify
+ * Hosting). There is no server process and therefore no database connection:
+ * a Postgres URL cannot be used from a browser without handing every visitor
+ * the credentials, so this module deliberately does not read one.
+ *
+ * Instead the app owns its data locally:
+ * 1. MemoryStore holds the working set as typed Maps keyed by record id.
+ * 2. Every mutation is flushed to localStorage (debounced), so a refresh,
+ *    a reopened tab, or a relaunched PWA resumes exactly where it left off.
+ * 3. On first load — or after a schema-version bump — the store re-seeds the
+ *    demo neighbourhood so a fresh visitor lands on a populated marketplace.
+ * 4. A Drizzle-shaped facade (db.query / insert / update / select /
+ *    transaction) is kept so the action layer reads like real data access and
+ *    can be re-pointed at a server API without touching call sites.
  * ============================================================================
  */
 
-// Enable fetch connection cache for edge and serverless environments
-if (typeof window === 'undefined') {
-  neonConfig.fetchConnectionCache = true;
-}
+// Bump when the seed data or record shape changes; persisted state from an
+// older version is discarded rather than migrated.
+const PERSIST_VERSION = 1;
+const PERSIST_KEY = 'sharehub:store:v' + PERSIST_VERSION;
 
-/**
- * Normalizes connection string with proper SSL and pooling parameters
- */
-function getSanitizedDatabaseUrl(): string {
-  let url = process.env.DATABASE_URL || '';
-  if (!url) return '';
+// Maps held on MemoryStore that are persisted and restored verbatim.
+const PERSISTED_COLLECTIONS = [
+  'users',
+  'listings',
+  'pricingTiers',
+  'userSubscriptions',
+  'usageLogs',
+  'bookings',
+  'payments',
+  'conditionLogs',
+  'trustGroups',
+  'groupMemberships',
+  'conversations',
+  'messages',
+  'reviews',
+  'systemLogs',
+] as const;
 
+type PersistedCollection = (typeof PERSISTED_COLLECTIONS)[number];
+
+// Record fields that are Date instances in memory and ISO strings on disk.
+const DATE_FIELD = /(At|Date|Start|End)$/;
+
+function isLocalStorageAvailable(): boolean {
   try {
-    // If URL lacks sslmode, append it for Neon PostgreSQL security requirement
-    if (url.startsWith('postgres://') || url.startsWith('postgresql://')) {
-      if (!url.includes('sslmode=')) {
-        const separator = url.includes('?') ? '&' : '?';
-        url = `${url}${separator}sslmode=require`;
-      }
-    }
-  } catch (e) {
-    console.warn('[Neon Connection Audit] URL normalization note:', e);
+    if (typeof window === 'undefined' || !window.localStorage) return false;
+    const probe = '__sharehub_probe__';
+    window.localStorage.setItem(probe, probe);
+    window.localStorage.removeItem(probe);
+    return true;
+  } catch {
+    // Safari private mode, disabled site data, or a storage quota of zero.
+    return false;
   }
-  return url;
 }
 
-const connectionString = getSanitizedDatabaseUrl();
+const canPersist = isLocalStorageAvailable();
+
+function reviveDates<T extends Record<string, any>>(record: T): T {
+  const revived: Record<string, any> = { ...record };
+  for (const key of Object.keys(revived)) {
+    const value = revived[key];
+    if (typeof value === 'string' && DATE_FIELD.test(key)) {
+      const parsed = new Date(value);
+      if (!Number.isNaN(parsed.getTime())) revived[key] = parsed;
+    }
+  }
+  return revived as T;
+}
 
 // Singleton connection or in-memory transactional mock fallback for browser preview
+/**
+ * A Map that reports every mutation back to the store so that writes made
+ * directly against a collection (which is how the action layer works) are
+ * saved without each call site having to remember to do it.
+ */
+class PersistentMap<V> extends Map<string, V> {
+  set(key: string, value: V): this {
+    super.set(key, value);
+    scheduleSave();
+    return this;
+  }
+
+  delete(key: string): boolean {
+    const removed = super.delete(key);
+    if (removed) scheduleSave();
+    return removed;
+  }
+
+  clear(): void {
+    super.clear();
+    scheduleSave();
+  }
+}
+
+// Saving is suppressed until the singleton finishes seeding and hydrating,
+// so construction does not write the store back over itself.
+let storeReady = false;
+
+function scheduleSave() {
+  if (!storeReady) return;
+  memoryStore.persist();
+}
+
 class MemoryStore {
-  users = new Map<string, schema.User>();
-  listings = new Map<string, schema.Listing>();
-  pricingTiers = new Map<string, schema.PricingTier>();
-  userSubscriptions = new Map<string, schema.UserSubscription>();
-  usageLogs = new Map<string, schema.UsageLog>();
-  bookings = new Map<string, schema.Booking>();
-  payments = new Map<string, schema.Payment>();
-  conditionLogs = new Map<string, schema.ConditionLog>();
-  trustGroups = new Map<string, schema.TrustGroup>();
-  groupMemberships = new Map<string, schema.GroupMembership>();
-  conversations = new Map<string, schema.Conversation>();
-  messages = new Map<string, schema.Message>();
-  reviews = new Map<string, schema.Review>();
-  systemLogs = new Map<string, schema.SystemLog>();
+  users = new PersistentMap<schema.User>();
+  listings = new PersistentMap<schema.Listing>();
+  pricingTiers = new PersistentMap<schema.PricingTier>();
+  userSubscriptions = new PersistentMap<schema.UserSubscription>();
+  usageLogs = new PersistentMap<schema.UsageLog>();
+  bookings = new PersistentMap<schema.Booking>();
+  payments = new PersistentMap<schema.Payment>();
+  conditionLogs = new PersistentMap<schema.ConditionLog>();
+  trustGroups = new PersistentMap<schema.TrustGroup>();
+  groupMemberships = new PersistentMap<schema.GroupMembership>();
+  conversations = new PersistentMap<schema.Conversation>();
+  messages = new PersistentMap<schema.Message>();
+  reviews = new PersistentMap<schema.Review>();
+  systemLogs = new PersistentMap<schema.SystemLog>();
+
+  private flushHandle: ReturnType<typeof setTimeout> | null = null;
+
+  /** Typed accessor for a persisted collection by name. */
+  private collection(name: PersistedCollection): Map<string, any> {
+    return this[name] as Map<string, any>;
+  }
 
   constructor() {
+    // Seed first so a partially-persisted store still has the demo catalogue
+    // behind it, then let any saved records win over the seeded defaults.
     this.seedDefaults();
+    this.hydrate();
+  }
+
+  /**
+   * Restores persisted records over the seeded defaults. A corrupt or
+   * unreadable payload is discarded silently — the seeded store is always a
+   * valid starting point, so a bad write can never brick the app.
+   */
+  private hydrate() {
+    if (!canPersist) return;
+    let raw: string | null = null;
+    try {
+      raw = window.localStorage.getItem(PERSIST_KEY);
+    } catch {
+      return;
+    }
+    if (!raw) return;
+
+    try {
+      const snapshot = JSON.parse(raw) as Record<string, [string, any][]>;
+      for (const collection of PERSISTED_COLLECTIONS) {
+        const entries = snapshot[collection];
+        if (!Array.isArray(entries)) continue;
+        const target = this.collection(collection);
+        for (const entry of entries) {
+          if (!Array.isArray(entry) || entry.length !== 2) continue;
+          const [id, record] = entry;
+          if (typeof id !== 'string' || record === null || typeof record !== 'object') continue;
+          target.set(id, reviveDates(record));
+        }
+      }
+    } catch (err) {
+      console.warn('[ShareHub Store] Discarding unreadable saved state:', err);
+      try {
+        window.localStorage.removeItem(PERSIST_KEY);
+      } catch {
+        /* nothing further we can do */
+      }
+    }
+  }
+
+  /**
+   * Queues a write to localStorage. Mutations arrive in bursts (a booking
+   * touches bookings, payments and systemLogs in one action), so the write is
+   * debounced to a single serialization per tick.
+   */
+  persist() {
+    if (!canPersist) return;
+    if (this.flushHandle !== null) clearTimeout(this.flushHandle);
+    this.flushHandle = setTimeout(() => {
+      this.flushHandle = null;
+      this.flush();
+    }, 120);
+  }
+
+  /** Serializes every persisted collection to localStorage immediately. */
+  flush() {
+    if (!canPersist) return;
+    try {
+      const snapshot: Record<string, [string, any][]> = {};
+      for (const collection of PERSISTED_COLLECTIONS) {
+        snapshot[collection] = Array.from(this.collection(collection).entries());
+      }
+      window.localStorage.setItem(PERSIST_KEY, JSON.stringify(snapshot));
+    } catch (err) {
+      // QuotaExceededError is the realistic case: keep running in memory
+      // rather than failing the users action.
+      console.warn('[ShareHub Store] Could not save state, continuing in memory:', err);
+    }
+  }
+
+  /** Wipes saved state and returns the store to the seeded demo neighbourhood. */
+  reset() {
+    for (const collection of PERSISTED_COLLECTIONS) {
+      this.collection(collection).clear();
+    }
+    this.seedDefaults();
+    if (canPersist) {
+      try {
+        window.localStorage.removeItem(PERSIST_KEY);
+      } catch {
+        /* ignore */
+      }
+    }
   }
 
   seedDefaults() {
@@ -371,16 +528,24 @@ class MemoryStore {
 
 export const memoryStore = new MemoryStore();
 
+storeReady = true;
+
+// The debounced save can still be in flight when a tab is closed or the PWA is
+// backgrounded on mobile, so force a synchronous write on the way out.
+if (typeof window !== 'undefined' && canPersist) {
+  window.addEventListener('pagehide', () => memoryStore.flush());
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') memoryStore.flush();
+  });
+}
+
 /**
  * Creates or gets the Drizzle DB instance
  */
 function createDbInstance() {
-  if (connectionString && connectionString.startsWith('postgres')) {
-    const sqlClient = neon(connectionString);
-    return drizzle(sqlClient, { schema });
-  }
-
-  // Transactional simulation engine conforming to Drizzle API
+  // Drizzle-shaped facade over MemoryStore. Mutating paths write through to
+  // the Maps and schedule a save, so the browser store is the single source of
+  // truth for the whole app.
   const queryEngine = {
     listings: {
       findMany: async ({ where, with: relations }: any = {}) => {
@@ -522,21 +687,23 @@ function createDbInstance() {
     update: updateEngine,
     select: selectEngine,
     transaction: async <T>(callback: (tx: any) => Promise<T>): Promise<T> => {
-      // Create transactional snapshot for rollback guarantee
-      const subSnapshot = new Map(memoryStore.userSubscriptions);
-      const usageSnapshot = new Map(memoryStore.usageLogs);
-      const systemSnapshot = new Map(memoryStore.systemLogs);
-      const bookingSnapshot = new Map(memoryStore.bookings);
-      const paymentSnapshot = new Map(memoryStore.payments);
-      const conditionSnapshot = new Map(memoryStore.conditionLogs);
-      const groupSnapshot = new Map(memoryStore.trustGroups);
-      const membershipSnapshot = new Map(memoryStore.groupMemberships);
-      const convSnapshot = new Map(memoryStore.conversations);
-      const msgSnapshot = new Map(memoryStore.messages);
-      const reviewSnapshot = new Map(memoryStore.reviews);
-      const listingSnapshot = new Map(memoryStore.listings);
-      const tierSnapshot = new Map(memoryStore.pricingTiers);
-      const userSnapshot = new Map(memoryStore.users);
+      // Snapshot every collection up front so a thrown callback restores the
+      // exact pre-transaction state. Snapshots are PersistentMaps too, so a
+      // rollback is itself saved rather than silently diverging from disk.
+      const subSnapshot = new PersistentMap(memoryStore.userSubscriptions);
+      const usageSnapshot = new PersistentMap(memoryStore.usageLogs);
+      const systemSnapshot = new PersistentMap(memoryStore.systemLogs);
+      const bookingSnapshot = new PersistentMap(memoryStore.bookings);
+      const paymentSnapshot = new PersistentMap(memoryStore.payments);
+      const conditionSnapshot = new PersistentMap(memoryStore.conditionLogs);
+      const groupSnapshot = new PersistentMap(memoryStore.trustGroups);
+      const membershipSnapshot = new PersistentMap(memoryStore.groupMemberships);
+      const convSnapshot = new PersistentMap(memoryStore.conversations);
+      const msgSnapshot = new PersistentMap(memoryStore.messages);
+      const reviewSnapshot = new PersistentMap(memoryStore.reviews);
+      const listingSnapshot = new PersistentMap(memoryStore.listings);
+      const tierSnapshot = new PersistentMap(memoryStore.pricingTiers);
+      const userSnapshot = new PersistentMap(memoryStore.users);
 
       const txProxy = {
         select: selectEngine,
@@ -547,6 +714,7 @@ function createDbInstance() {
 
       try {
         const result = await callback(txProxy);
+        memoryStore.flush();
         return result;
       } catch (err) {
         // Rollback snapshot on transaction failure
@@ -564,6 +732,7 @@ function createDbInstance() {
         memoryStore.listings = listingSnapshot;
         memoryStore.pricingTiers = tierSnapshot;
         memoryStore.users = userSnapshot;
+        memoryStore.flush();
         throw err;
       }
     },

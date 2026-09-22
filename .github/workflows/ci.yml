@@ -1,0 +1,53 @@
+name: CI
+
+# Runs the same install and build that AWS Amplify runs, so a change that
+# would break the hosted build fails here first.
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Typecheck & build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      # `npm run build` already runs `tsc --noEmit` first; this reports the
+      # typecheck as its own step so a type error is obvious in the summary.
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: Check the bundle carries no server or database references
+        run: |
+          # The app is a static SPA. Anything below would mean server-only code,
+          # or worse a credential, had been bundled for every visitor to read.
+          if grep -rlE 'neondatabase|DATABASE_URL|BETTER_AUTH_SECRET' dist/; then
+            echo "Server/database references found in the built bundle." >&2
+            exit 1
+          fi
+          echo "Bundle is clean."
+
+      - name: Check the PWA icons the manifest references were built
+        run: |
+          for icon in icon-192.png icon-512.png icon-maskable-512.png; do
+            test -f "dist/icons/$icon" || { echo "Missing dist/icons/$icon" >&2; exit 1; }
+          done
+          echo "All manifest icons present."

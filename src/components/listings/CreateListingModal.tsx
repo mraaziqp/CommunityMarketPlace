@@ -18,7 +18,7 @@ import {
   Camera,
 } from 'lucide-react';
 import { ListingCategory, ListingModel, PricingType } from '../../types';
-import { getSignedUploadUrl, registerUploadedListingPhoto } from '../../../actions/storage';
+import { prepareListingImage, registerUploadedListingPhoto } from '../../../actions/storage';
 import { createListing } from '../../../actions/listings';
 import { cn } from '../../lib/utils';
 
@@ -56,7 +56,9 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
   const [rules, setRules] = useState('Please wipe down after use. Keep door ajar.');
   const [visibilityGroupId, setVisibilityGroupId] = useState<string>('public');
 
-  // Handle direct-to-bucket pre-signed upload with physical HTTP PUT execution
+  // Normalise a picked photo in the browser: validate, downscale, encode.
+  // There is no bucket to upload to, and the encoded result is what gets
+  // stored with the listing, so it still resolves after a reload.
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
@@ -64,56 +66,28 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
     const file = files[0];
     setIsUploading(true);
     setUploadError(null);
-    setUploadProgress(15);
+    setUploadProgress(20);
 
     try {
-      // 1. Request pre-signed URL from server action
-      const signedRes = await getSignedUploadUrl({
-        filename: file.name,
-        contentType: file.type || 'image/jpeg',
-        fileSizeBytes: file.size,
-      });
+      const result = await prepareListingImage(file);
 
-      if (!signedRes.success) {
-        setUploadError(signedRes.error || 'Failed to acquire upload authorization.');
+      if (!result.success) {
+        setUploadError(result.error || 'Failed to process the selected image.');
         setIsUploading(false);
         setUploadProgress(null);
         return;
       }
 
-      setUploadProgress(45);
+      setUploadProgress(80);
 
-      // 2. Execute HTTP PUT request directly from client to storage bucket
-      let finalPhotoUrl = signedRes.publicUrl;
-      try {
-        const uploadResponse = await fetch(signedRes.uploadUrl, {
-          method: 'PUT',
-          headers: signedRes.headers || {
-            'Content-Type': file.type || 'image/jpeg',
-          },
-          body: file,
-        });
-
-        if (!uploadResponse.ok && uploadResponse.status !== 0) {
-          console.warn('Storage bucket PUT returned non-200, falling back to local object stream:', uploadResponse.status);
-          finalPhotoUrl = URL.createObjectURL(file);
-        }
-      } catch (putErr) {
-        console.warn('Direct bucket PUT completed or fallback mode:', putErr);
-        finalPhotoUrl = URL.createObjectURL(file);
-      }
-
-      setUploadProgress(85);
-
-      // 3. Register uploaded image in system audit log & state
       await registerUploadedListingPhoto({
         listingId: `list_temp_${Date.now()}`,
-        photoUrl: finalPhotoUrl,
-        key: signedRes.key,
+        photoUrl: result.publicUrl,
+        key: result.key,
         userId: 'usr_me',
       });
 
-      setImages((prev) => [...prev, finalPhotoUrl]);
+      setImages((prev) => [...prev, result.publicUrl]);
       setUploadProgress(100);
       setTimeout(() => {
         setIsUploading(false);
@@ -123,6 +97,9 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({
       setUploadError(err.message || 'Media upload failed.');
       setIsUploading(false);
       setUploadProgress(null);
+    } finally {
+      // Allow re-picking the same file after a failure.
+      e.target.value = '';
     }
   };
 

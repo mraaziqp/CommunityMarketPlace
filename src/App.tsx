@@ -220,6 +220,7 @@ export default function App({ initialListings }: { initialListings?: ListingMode
       renterId: 'usr_me',
       renterName: 'Alex Rivera',
       status: 'PENDING_HANDOVER',
+      disputeStatus: 'NONE',
       verificationCode: 'HANDOVER-8842',
       totalAmountInCents: 15000,
       depositAmountInCents: 50000,
@@ -621,7 +622,16 @@ export default function App({ initialListings }: { initialListings?: ListingMode
           userSubscription={subscriptions.find(
             (s) => s.listingId === selectedListing.id
           )}
-          onLogUsage={handleLogUsage}
+          onLogUsage={(subscriptionId, notes) => {
+            // The modal only knows the subscription id; resolve it to the
+            // full record the usage handler works against.
+            const sub = subscriptions.find((s) => s.id === subscriptionId);
+            if (!sub) {
+              showToast('That subscription is no longer active.');
+              return;
+            }
+            handleLogUsage(sub, notes);
+          }}
           onMessageHost={(listing) => {
             setChatListing(listing);
             setIsChatOpen(true);

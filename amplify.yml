@@ -3,9 +3,16 @@ frontend:
   phases:
     preBuild:
       commands:
+        # Amplify's default image ships several Node versions; pin the one the
+        # app is built and tested against rather than inheriting the default.
+        - nvm install 22
+        - nvm use 22
+        - node --version
         - npm ci
     build:
       commands:
+        # `npm run build` runs `tsc --noEmit` before Vite, so a type error
+        # fails the deployment here instead of shipping a broken bundle.
         - npm run build
   artifacts:
     baseDirectory: dist
@@ -14,19 +21,27 @@ frontend:
   cache:
     paths:
       - node_modules/**/*
+      - ~/.npm/**/*
 customHeaders:
   - pattern: '**/*'
     headers:
       - key: 'X-Frame-Options'
         value: 'SAMEORIGIN'
-      - key: 'X-XSS-Protection'
-        value: '1; mode=block'
       - key: 'X-Content-Type-Options'
         value: 'nosniff'
       - key: 'Referrer-Policy'
         value: 'strict-origin-when-cross-origin'
+      # Geolocation drives proximity search and the camera is used for
+      # condition photos, so both stay enabled for this origin only.
       - key: 'Permissions-Policy'
-        value: 'camera=*, microphone=*, geolocation=*'
+        value: 'camera=(self), microphone=(), geolocation=(self)'
+      - key: 'Strict-Transport-Security'
+        value: 'max-age=31536000; includeSubDomains'
+      # Listing photos may be any https image the host pasted in, and locally
+      # processed uploads arrive as data: URLs, so img-src stays broad while
+      # script-src does not.
+      - key: 'Content-Security-Policy'
+        value: "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob: https:; connect-src 'self'; manifest-src 'self'; worker-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none'"
   - pattern: '/assets/*'
     headers:
       - key: 'Cache-Control'
@@ -37,3 +52,9 @@ customHeaders:
         value: 'no-cache, no-store, must-revalidate'
       - key: 'Service-Worker-Allowed'
         value: '/'
+  - pattern: '/manifest.webmanifest'
+    headers:
+      - key: 'Cache-Control'
+        value: 'public, max-age=3600'
+      - key: 'Content-Type'
+        value: 'application/manifest+json'
