@@ -72,6 +72,51 @@ This guide provides step-by-step instructions for hosting the **CommunityMarketP
    - `DATABASE_URL`: Your Neon Postgres connection string.
 7. Click **Save and deploy**. Amplify will build and deploy on every git push.
 
+### Troubleshooting: `CustomerError: Cannot read 'next' version in package.json`
+
+If your Amplify build fails with:
+```
+[ERROR]: !!! CustomerError: Cannot read 'next' version in package.json.
+If you are using monorepo, please ensure that AMPLIFY_MONOREPO_APP_ROOT is set correctly.
+```
+
+**Why this happens:**
+Amplify was initially set to **`WEB_COMPUTE`** (Next.js SSR) instead of **`WEB`** (Single Page Application). In `WEB_COMPUTE` mode, Amplify runs an internal pre-flight check looking for `next` in `package.json` before running `amplify.yml`.
+
+**How to resolve (Choose one method):**
+
+#### Method A: AWS CloudShell (Fastest - 1 minute)
+1. Open the [AWS Management Console](https://console.aws.amazon.com/).
+2. Click the **CloudShell** icon (`>_`) in the top navigation bar.
+3. Run the following command (replace `<YOUR_APP_ID>` with your Amplify App ID):
+   ```bash
+   # Switch platform to WEB (SPA)
+   aws amplify update-app --app-id <YOUR_APP_ID> --platform WEB
+   
+   # Set branch framework to React
+   aws amplify update-branch --app-id <YOUR_APP_ID> --branch-name main --framework 'React'
+   
+   # Trigger a new clean build
+   aws amplify start-job --app-id <YOUR_APP_ID> --branch-name main --job-type RELEASE
+   ```
+
+#### Method B: Automated Local Script
+Run the automated repair script included in this repository:
+```bash
+npm run fix-amplify
+# or: node scripts/fix-amplify.mjs --app-id <YOUR_APP_ID>
+```
+
+#### Method C: Reconnect in Amplify Console
+1. Go to **AWS Amplify Console** > Select your existing app > **App settings** > **General settings** > Delete app (or click **Create new app** > **Host web app**).
+2. Connect `mraaziqp/CommunityMarketPlace` with branch `main`.
+3. Amplify will detect the clean Vite SPA setup and set the platform to `WEB` automatically.
+
+### Configuring SPA Rewrite Rule (Client-Side Routing)
+In AWS Amplify Console, navigate to **App settings** > **Rewrites and redirects**, and ensure the following rule exists so routes like `/dashboard` do not return 404:
+- **Source address**: `</^[^.]+$|\.(?!(css|gif|ico|jpg|js|png|txt|svg|woff|woff2|ttf|map|json)$)([^.]+$)/>`
+- **Target address**: `/index.html`
+- **Type**: `200 (Rewrite)`
 ---
 
 ## Option 3: Deploy with Docker & AWS App Runner / ECS
