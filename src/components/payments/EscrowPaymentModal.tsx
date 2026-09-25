@@ -27,7 +27,7 @@ export const EscrowPaymentModal: React.FC<EscrowPaymentModalProps> = ({
   booking,
   onPaymentAuthorized,
 }) => {
-  const [gateway, setGateway] = useState<'paystack' | 'stripe'>('paystack');
+  const [gateway, setGateway] = useState<'payfast' | 'paystack' | 'stripe'>('payfast');
   const [paymentMethod, setPaymentMethod] = useState<'card' | 'eft' | 'snapscan'>('card');
   const [isProcessing, setIsProcessing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -215,24 +215,43 @@ export const EscrowPaymentModal: React.FC<EscrowPaymentModalProps> = ({
               <label className="block text-xs font-bold text-stone-500 uppercase tracking-wider mb-2">
                 Payment Gateway Provider
               </label>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                <button
+                  type="button"
+                  id="select-payfast-btn"
+                  onClick={() => setGateway('payfast')}
+                  className={`p-3 rounded-xl border text-left transition-all ${
+                    gateway === 'payfast'
+                      ? 'border-emerald-600 bg-emerald-50/50 shadow-2xs ring-1 ring-emerald-600'
+                      : 'border-stone-200 hover:border-stone-300'
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-xs font-bold text-stone-900">PayFast</span>
+                    <span className="text-[10px] px-1.5 py-0.5 bg-emerald-100 text-emerald-800 rounded font-medium">
+                      Official SA
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-stone-500">Merchant #36249939 • Instant EFT, Card, Capitec Pay</p>
+                </button>
+
                 <button
                   type="button"
                   id="select-paystack-btn"
                   onClick={() => setGateway('paystack')}
                   className={`p-3 rounded-xl border text-left transition-all ${
                     gateway === 'paystack'
-                      ? 'border-emerald-600 bg-emerald-50/50 shadow-2xs'
+                      ? 'border-emerald-600 bg-emerald-50/50 shadow-2xs ring-1 ring-emerald-600'
                       : 'border-stone-200 hover:border-stone-300'
                   }`}
                 >
                   <div className="flex items-center justify-between mb-1">
                     <span className="text-xs font-bold text-stone-900">Paystack</span>
                     <span className="text-[10px] px-1.5 py-0.5 bg-blue-100 text-blue-800 rounded font-medium">
-                      SA Default
+                      SA Backup
                     </span>
                   </div>
-                  <p className="text-[11px] text-stone-500">Cards, Instant EFT, SnapScan</p>
+                  <p className="text-[11px] text-stone-500">Cards, SnapScan</p>
                 </button>
 
                 <button
@@ -241,7 +260,7 @@ export const EscrowPaymentModal: React.FC<EscrowPaymentModalProps> = ({
                   onClick={() => setGateway('stripe')}
                   className={`p-3 rounded-xl border text-left transition-all ${
                     gateway === 'stripe'
-                      ? 'border-emerald-600 bg-emerald-50/50 shadow-2xs'
+                      ? 'border-emerald-600 bg-emerald-50/50 shadow-2xs ring-1 ring-emerald-600'
                       : 'border-stone-200 hover:border-stone-300'
                   }`}
                 >
@@ -251,7 +270,7 @@ export const EscrowPaymentModal: React.FC<EscrowPaymentModalProps> = ({
                       Global
                     </span>
                   </div>
-                  <p className="text-[11px] text-stone-500">Global Visa/Mastercard/Amex</p>
+                  <p className="text-[11px] text-stone-500">Visa, Mastercard, Amex</p>
                 </button>
               </div>
             </div>

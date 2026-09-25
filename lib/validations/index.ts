@@ -127,7 +127,7 @@ export const CreatePaymentIntentSchema = z.object({
   bookingId: z.string().trim().min(1, 'Booking ID is required'),
   amountInCents: z.number().int().positive('Payment amount must be greater than zero'),
   currency: z.string().default('ZAR').optional(),
-  gateway: z.enum(['paystack', 'stripe']).optional().default('paystack'),
+  gateway: z.enum(['payfast', 'paystack', 'stripe']).optional().default('payfast'),
   userId: z.string().optional(),
 });
 

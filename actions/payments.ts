@@ -11,6 +11,7 @@ import {
 } from '../db/schema';
 import { eq } from 'drizzle-orm';
 import { validateInput, CreatePaymentIntentSchema } from '../lib/validations';
+import { buildPayFastCheckoutUrl } from '../lib/payfast';
 
 export interface PaymentIntentResult {
   success: boolean;
@@ -93,7 +94,7 @@ export interface EscrowRefundResult {
 export async function createPaymentIntent(
   bookingId: string,
   amountInCents: number,
-  gateway: 'paystack' | 'stripe' = 'paystack',
+  gateway: 'payfast' | 'paystack' | 'stripe' = 'payfast',
   userId: string = 'usr_me'
 ): Promise<PaymentIntentResult> {
   const validated = validateInput(CreatePaymentIntentSchema, {
@@ -105,10 +106,24 @@ export async function createPaymentIntent(
 
   return await db.transaction(async (tx: any) => {
     const paymentId = `pay_escrow_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-    const gatewayRef =
-      validated.gateway === 'paystack'
-        ? `pstk_auth_escrow_${Math.random().toString(36).substring(2, 8).toUpperCase()}`
-        : `pi_stripe_escrow_${Math.random().toString(36).substring(2, 8)}`;
+    let gatewayRef: string;
+    let checkoutUrl: string;
+
+    if (validated.gateway === 'payfast') {
+      const payfastData = buildPayFastCheckoutUrl({
+        bookingId: validated.bookingId,
+        amountInCents: validated.amountInCents,
+        itemName: `ShareHub Escrow Hold #${validated.bookingId.slice(-6)}`,
+      });
+      gatewayRef = payfastData.paymentRef;
+      checkoutUrl = payfastData.url;
+    } else if (validated.gateway === 'paystack') {
+      gatewayRef = `pstk_auth_escrow_${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
+      checkoutUrl = `https://checkout.paystack.com/pay/${gatewayRef}`;
+    } else {
+      gatewayRef = `pi_stripe_escrow_${Math.random().toString(36).substring(2, 8)}`;
+      checkoutUrl = `https://checkout.stripe.com/pay/${gatewayRef}`;
+    }
 
     const now = new Date();
     const systemLogId = `sys_log_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
@@ -137,7 +152,7 @@ export async function createPaymentIntent(
         action: 'ESCROW_FUNDS_AUTHORIZED',
         bookingId,
         paymentId,
-        gateway,
+        gateway: validated.gateway || gateway,
         gatewayRef,
         amountInCents,
         amountFormatted: `R${(amountInCents / 100).toFixed(2)}`,
@@ -161,7 +176,7 @@ export async function createPaymentIntent(
         createdAt: now.toISOString(),
       },
       clientSecret: `${gatewayRef}_secret_test`,
-      checkoutUrl: `https://checkout.${gateway}.com/pay/${gatewayRef}`,
+      checkoutUrl,
       systemLog: {
         id: systemLogRecord.id,
         eventType: systemLogRecord.eventType,

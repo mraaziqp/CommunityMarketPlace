@@ -22,17 +22,34 @@ export async function POST(req: Request) {
   try {
     let body: any;
     try {
-      body = await req.json();
+      const contentType = req.headers.get('content-type') || '';
+      if (contentType.includes('application/x-www-form-urlencoded')) {
+        const text = await req.text();
+        const params = new URLSearchParams(text);
+        body = Object.fromEntries(params.entries());
+      } else {
+        body = await req.json();
+      }
     } catch {
-      return jsonResponse({ error: 'Invalid JSON payload' }, { status: 400 });
+      return jsonResponse({ error: 'Invalid payload' }, { status: 400 });
     }
 
-    const event = body.event || body.type || 'charge.success';
-    const data = body.data || body.data?.object || body;
+    const isPayFast = body.payment_status !== undefined || body.m_payment_id !== undefined;
+    const isPayFastSuccess = isPayFast && body.payment_status === 'COMPLETE';
+    const event = isPayFast
+      ? (isPayFastSuccess ? 'charge.success' : 'payment_intent.canceled')
+      : (body.event || body.type || 'charge.success');
+    const data = isPayFast ? body : (body.data || body.data?.object || body);
 
-    const gatewayRef = data.reference || data.id || data.paymentGatewayRef || 'pstk_mock_ref';
-    const bookingId = data.metadata?.bookingId || data.bookingId || 'book_drill_001';
-    const amountInCents = data.amount || 65000;
+    const gatewayRef = isPayFast
+      ? (body.pf_payment_id || body.m_payment_id || 'payfast_ref')
+      : (data.reference || data.id || data.paymentGatewayRef || 'pstk_mock_ref');
+    const bookingId = isPayFast
+      ? (body.m_payment_id?.startsWith('pf_') ? body.m_payment_id.split('_')[1] : body.m_payment_id || 'book_drill_001')
+      : (data.metadata?.bookingId || data.bookingId || 'book_drill_001');
+    const amountInCents = isPayFast && body.amount_gross
+      ? Math.round(parseFloat(body.amount_gross) * 100)
+      : (data.amount || 65000);
     const now = new Date();
 
     const result = await db.transaction(async (tx: any) => {
