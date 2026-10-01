@@ -16,9 +16,13 @@ import { EscrowPaymentModal } from './components/payments/EscrowPaymentModal';
 import { ReviewModal } from './components/reviews/ReviewModal';
 import { ReturnHandoverModal } from './components/bookings/ReturnHandoverModal';
 import { TrustGroupHub } from './components/groups/TrustGroupHub';
-import { DashboardPage } from './pages/DashboardPage';
 import { useRoute, parseMeSection, parseAdminTab } from './lib/router';
 import { api, submitCheckout } from './api/client';
+
+// Personal member dashboard is loaded on demand when navigating to /me
+const DashboardPage = lazy(() =>
+  import('./pages/DashboardPage').then((m) => ({ default: m.DashboardPage }))
+);
 import {
   ListingModel,
   PricingTierModel,
@@ -449,27 +453,41 @@ export default function App() {
         )
       ) : isMeRoute ? (
         <main className="flex-1 w-full py-6">
-          <DashboardPage
-            currentUser={currentUser}
-            initialSection={parseMeSection(path)}
-            onNavigateSection={(sec) => navigate(sec === 'overview' ? '/me' : `/me/${sec}`)}
-            onBackToHome={() => navigate('/')}
-            activity={activity}
-            refreshActivity={refreshActivity}
-            circles={myCircles}
-            onOpenCreateListing={openCreateListing}
-            onEditListing={(listing) => setEditingListing(listing)}
-            onViewListing={(listing) => setSelectedListing(listing)}
-            onPay={(booking) => setPaymentBooking(booking)}
-            onCheckReturn={(booking) => setReturnBooking(booking)}
-            onReview={(booking) => setReviewBooking(booking)}
-            onSignOut={handleSignOut}
-            onUserUpdated={(updatedUser) => {
-              setCurrentUser(updatedUser);
-              showToast('Profile updated!');
-            }}
-            showToast={showToast}
-          />
+          <Suspense
+            fallback={
+              <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 animate-pulse space-y-6">
+                <div className="h-8 bg-slate-200 rounded-xl w-48 mb-6" />
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                  {[1, 2, 3, 4].map((i) => (
+                    <div key={i} className="h-28 bg-slate-200 rounded-2xl" />
+                  ))}
+                </div>
+                <div className="h-64 bg-slate-200 rounded-3xl mt-6" />
+              </div>
+            }
+          >
+            <DashboardPage
+              currentUser={currentUser}
+              initialSection={parseMeSection(path)}
+              onNavigateSection={(sec) => navigate(sec === 'overview' ? '/me' : `/me/${sec}`)}
+              onBackToHome={() => navigate('/')}
+              activity={activity}
+              refreshActivity={refreshActivity}
+              circles={myCircles}
+              onOpenCreateListing={openCreateListing}
+              onEditListing={(listing) => setEditingListing(listing)}
+              onViewListing={(listing) => setSelectedListing(listing)}
+              onPay={(booking) => setPaymentBooking(booking)}
+              onCheckReturn={(booking) => setReturnBooking(booking)}
+              onReview={(booking) => setReviewBooking(booking)}
+              onSignOut={handleSignOut}
+              onUserUpdated={(updatedUser) => {
+                setCurrentUser(updatedUser);
+                showToast('Profile updated!');
+              }}
+              showToast={showToast}
+            />
+          </Suspense>
         </main>
       ) : (
         <>

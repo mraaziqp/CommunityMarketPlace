@@ -38,13 +38,19 @@ export const AuthGate: React.FC<AuthGateProps> = ({ onAuthSuccess }) => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    const cleanEmail = email.trim().toLowerCase();
+    const cleanName = name.trim();
+    if (mode === 'signup' && password.length < 8) {
+      setErrorMsg('Password must be at least 8 characters long.');
+      return;
+    }
     setIsLoading(true);
     setErrorMsg(null);
     try {
       const { user } =
         mode === 'signup'
-          ? await api.signUp({ name, email, password, neighborhood: neighborhood || undefined })
-          : await api.signIn({ email, password });
+          ? await api.signUp({ name: cleanName, email: cleanEmail, password, neighborhood: neighborhood.trim() || undefined })
+          : await api.signIn({ email: cleanEmail, password });
       onAuthSuccess({ user });
     } catch (err: any) {
       setErrorMsg(err?.message || 'Something went wrong. Please check your details and try again.');
@@ -205,6 +211,7 @@ export const AuthGate: React.FC<AuthGateProps> = ({ onAuthSuccess }) => {
                   <input
                     type="text"
                     required
+                    autoComplete="name"
                     value={name}
                     onChange={(e) => setName(e.target.value)}
                     placeholder="Thandi Nkosi"
@@ -221,6 +228,7 @@ export const AuthGate: React.FC<AuthGateProps> = ({ onAuthSuccess }) => {
                 <input
                   type="email"
                   required
+                  autoComplete="email"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder="you@example.com"
@@ -236,6 +244,7 @@ export const AuthGate: React.FC<AuthGateProps> = ({ onAuthSuccess }) => {
                 <input
                   type="password"
                   required
+                  autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
                   minLength={mode === 'signup' ? 8 : undefined}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}

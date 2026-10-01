@@ -15,12 +15,11 @@ export default defineConfig(() => {
       chunkSizeWarningLimit: 1000,
       rollupOptions: {
         output: {
-          manualChunks: {
-            'vendor-recharts': ['recharts'],
-            'vendor-icons': ['lucide-react'],
+          manualChunks(id) {
+            if (id.includes('node_modules/recharts')) return 'vendor-recharts';
+            if (id.includes('node_modules/lucide-react')) return 'vendor-icons';
+            if (id.includes('node_modules/firebase')) return 'vendor-firebase';
           },
-
-
         },
       },
     },

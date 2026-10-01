@@ -75,7 +75,7 @@ export const securityHeaders: MiddlewareHandler = async (c, next) => {
       "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
       "font-src 'self' https://fonts.gstatic.com data:",
       "img-src 'self' data: blob: https:",
-      "connect-src 'self'",
+      "connect-src 'self' https://*.googleapis.com https://*.firebaseio.com https://*.firebasestorage.app https://identitytoolkit.googleapis.com https://securetoken.googleapis.com",
       "manifest-src 'self'",
       "worker-src 'self'",
       "frame-ancestors 'self'",
