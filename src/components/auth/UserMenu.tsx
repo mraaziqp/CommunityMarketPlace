@@ -9,6 +9,7 @@ export interface UserMenuProps {
   onSignOut: () => void;
   onOpenAdminDashboard: () => void;
   onOpenActivity: () => void;
+  onNavigateDashboard?: (section?: string) => void;
   /** Development builds only. */
   onSwitchDemoAccount?: (role: UserRole) => void;
   /** Development builds only. */
@@ -51,6 +52,7 @@ export const UserMenu: React.FC<UserMenuProps> = ({
   onSignOut,
   onOpenAdminDashboard,
   onOpenActivity,
+  onNavigateDashboard,
   onSwitchDemoAccount,
   onOpenArchitecture,
 }) => {
@@ -119,19 +121,84 @@ export const UserMenu: React.FC<UserMenuProps> = ({
             <p className="text-[11px] text-slate-500 truncate">{user.email}</p>
           </div>
 
-          <div className="p-1 border-b border-slate-100">
-            <button
-              type="button"
-              role="menuitem"
-              onClick={() => {
-                close();
-                onOpenActivity();
-              }}
-              className="w-full px-3 py-2 rounded-xl text-xs font-semibold text-slate-700 hover:bg-slate-50 flex items-center gap-2 transition-colors cursor-pointer"
-            >
-              <Clock className="w-4 h-4 text-indigo-600" />
-              <span>My activity</span>
-            </button>
+          <div className="p-1 border-b border-slate-100 space-y-0.5">
+            {onNavigateDashboard ? (
+              <>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    close();
+                    onNavigateDashboard('overview');
+                  }}
+                  className="w-full px-3 py-2 rounded-xl text-xs font-bold text-slate-900 hover:bg-slate-50 flex items-center gap-2 transition-colors cursor-pointer"
+                >
+                  <LayoutDashboard className="w-4 h-4 text-emerald-600" />
+                  <span>My Dashboard</span>
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    close();
+                    onNavigateDashboard('rentals');
+                  }}
+                  className="w-full px-3 py-2 rounded-xl text-xs font-semibold text-slate-700 hover:bg-slate-50 flex items-center gap-2 transition-colors cursor-pointer"
+                >
+                  <Clock className="w-4 h-4 text-indigo-600" />
+                  <span>My Rentals</span>
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    close();
+                    onNavigateDashboard('listings');
+                  }}
+                  className="w-full px-3 py-2 rounded-xl text-xs font-semibold text-slate-700 hover:bg-slate-50 flex items-center gap-2 transition-colors cursor-pointer"
+                >
+                  <ShieldCheck className="w-4 h-4 text-amber-600" />
+                  <span>My Listings & Gear</span>
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    close();
+                    onNavigateDashboard('earnings');
+                  }}
+                  className="w-full px-3 py-2 rounded-xl text-xs font-semibold text-slate-700 hover:bg-slate-50 flex items-center gap-2 transition-colors cursor-pointer"
+                >
+                  <Shield className="w-4 h-4 text-purple-600" />
+                  <span>Earnings & Payouts</span>
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    close();
+                    onNavigateDashboard('profile');
+                  }}
+                  className="w-full px-3 py-2 rounded-xl text-xs font-semibold text-slate-700 hover:bg-slate-50 flex items-center gap-2 transition-colors cursor-pointer"
+                >
+                  <User className="w-4 h-4 text-slate-600" />
+                  <span>Profile & Settings</span>
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  close();
+                  onOpenActivity();
+                }}
+                className="w-full px-3 py-2 rounded-xl text-xs font-semibold text-slate-700 hover:bg-slate-50 flex items-center gap-2 transition-colors cursor-pointer"
+              >
+                <Clock className="w-4 h-4 text-indigo-600" />
+                <span>My activity</span>
+              </button>
+            )}
 
             {user.role === 'ADMIN' && (
               <button
@@ -141,10 +208,10 @@ export const UserMenu: React.FC<UserMenuProps> = ({
                   close();
                   onOpenAdminDashboard();
                 }}
-                className="w-full px-3 py-2 rounded-xl text-xs font-semibold text-purple-700 hover:bg-purple-50 flex items-center gap-2 transition-colors cursor-pointer"
+                className="w-full px-3 py-2 rounded-xl text-xs font-bold text-purple-700 hover:bg-purple-50 flex items-center gap-2 transition-colors cursor-pointer"
               >
                 <LayoutDashboard className="w-4 h-4" />
-                <span>Admin dashboard</span>
+                <span>Admin console</span>
               </button>
             )}
           </div>

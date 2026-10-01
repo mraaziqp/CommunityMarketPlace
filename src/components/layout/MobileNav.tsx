@@ -14,6 +14,8 @@ export interface MobileNavProps {
   onOpenCreateListing: () => void;
   onOpenCircles: () => void;
   onOpenActivity: () => void;
+  onNavigateHome?: () => void;
+  onNavigateDashboard?: (section?: string) => void;
 }
 
 /**
@@ -28,6 +30,8 @@ export const MobileNav: React.FC<MobileNavProps> = ({
   onOpenCreateListing,
   onOpenCircles,
   onOpenActivity,
+  onNavigateHome,
+  onNavigateDashboard,
 }) => {
   const tabClass = (tab: MobileTab, activeColor: string) =>
     cn(
@@ -47,6 +51,9 @@ export const MobileNav: React.FC<MobileNavProps> = ({
           type="button"
           onClick={() => {
             onSelectTab('explore');
+            if (onNavigateHome) {
+              onNavigateHome();
+            }
             window.scrollTo({ top: 0, behavior: 'smooth' });
           }}
           className={tabClass('explore', 'text-indigo-600')}
@@ -86,7 +93,11 @@ export const MobileNav: React.FC<MobileNavProps> = ({
           type="button"
           onClick={() => {
             onSelectTab('activity');
-            onOpenActivity();
+            if (onNavigateDashboard) {
+              onNavigateDashboard('rentals');
+            } else {
+              onOpenActivity();
+            }
           }}
           className={tabClass('activity', 'text-amber-600')}
         >

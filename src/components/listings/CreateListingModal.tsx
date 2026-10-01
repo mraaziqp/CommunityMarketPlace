@@ -9,7 +9,10 @@ export interface CreateListingModalProps {
   /** Circles the host belongs to; a listing can be limited to one of them. */
   circles: TrustGroupModel[];
   onClose: () => void;
-  onCreate: (listing: ListingModel) => void;
+  onCreate?: (listing: ListingModel) => void;
+  /** Edit mode: when supplied, the modal edits an existing listing instead of creating */
+  initial?: ListingModel | null;
+  onUpdate?: (listing: ListingModel) => void;
 }
 
 const CATEGORIES: { id: ListingCategory; label: string; hint: string; icon: React.ReactNode }[] = [
@@ -35,22 +38,25 @@ const DEFAULT_DEPOSIT_RANDS: Record<ListingCategory, number> = { physical_item: 
 
 const fieldClass = 'w-full px-3.5 py-2.5 text-sm bg-slate-50 rounded-xl border border-slate-200 focus:bg-white focus:border-slate-400 outline-none';
 
-export const CreateListingModal: React.FC<CreateListingModalProps> = ({ circles, onClose, onCreate }) => {
-  const [category, setCategory] = useState<ListingCategory>('physical_item');
-  const [title, setTitle] = useState('');
-  const [description, setDescription] = useState('');
-  const [address, setAddress] = useState('');
-  const [neighborhood, setNeighborhood] = useState('');
-  const [city, setCity] = useState('Cape Town');
-  const [images, setImages] = useState<string[]>([]);
+export const CreateListingModal: React.FC<CreateListingModalProps> = ({ circles, onClose, onCreate, initial, onUpdate }) => {
+  const isEdit = !!initial;
+  const initialTier = initial?.pricingTiers?.[0];
+
+  const [category, setCategory] = useState<ListingCategory>(initial?.category ?? 'physical_item');
+  const [title, setTitle] = useState(initial?.title ?? '');
+  const [description, setDescription] = useState(initial?.description ?? '');
+  const [address, setAddress] = useState(initial?.address ?? '');
+  const [neighborhood, setNeighborhood] = useState(initial?.neighborhood ?? '');
+  const [city, setCity] = useState(initial?.city ?? 'Cape Town');
+  const [images, setImages] = useState<string[]>(initial?.images ?? []);
   const [imageUrl, setImageUrl] = useState('');
-  const [rateType, setRateType] = useState<PricingType>('daily');
-  const [price, setPrice] = useState(150);
-  const [deposit, setDeposit] = useState(DEFAULT_DEPOSIT_RANDS.physical_item);
-  const [maxHouseholds, setMaxHouseholds] = useState(4);
-  const [turnsPerMonth, setTurnsPerMonth] = useState(10);
-  const [rules, setRules] = useState('');
-  const [circleId, setCircleId] = useState('public');
+  const [rateType, setRateType] = useState<PricingType>(initialTier?.type ?? 'daily');
+  const [price, setPrice] = useState(initialTier ? Math.round(initialTier.priceInCents / 100) : 150);
+  const [deposit, setDeposit] = useState(initial ? Math.round(initial.depositRequiredInCents / 100) : DEFAULT_DEPOSIT_RANDS.physical_item);
+  const [maxHouseholds, setMaxHouseholds] = useState(initial?.maxSubscribers ?? 4);
+  const [turnsPerMonth, setTurnsPerMonth] = useState(initialTier?.usageLimitPerPeriod ?? 10);
+  const [rules, setRules] = useState(initial?.rules ?? '');
+  const [circleId, setCircleId] = useState(initial?.visibilityGroupId ?? 'public');
   const [isUploading, setIsUploading] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -104,37 +110,62 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({ circles,
     const isCoop = category === 'fractional_appliance';
     const rateLabel = RATE_OPTIONS[category].find((r) => r.type === rateType)?.label ?? '';
     try {
-      const listing = await api.createListing({
-        title: title.trim(),
-        description: description.trim(),
-        category,
-        address,
-        neighborhood,
-        city,
-        images,
-        rules: rules.trim() || undefined,
-        depositRequiredInCents: Math.max(0, Math.round(deposit * 100)),
-        maxSubscribers: isCoop ? maxHouseholds : 1,
-        accessMethod: isCoop ? 'pin_code' : category === 'room' ? 'pin_code' : 'host_handover',
-        visibilityGroupId: circleId !== 'public' ? circleId : null,
-        pricingTiers: [
-          {
-            name: isCoop ? `${turnsPerMonth} turns a month` : `Rate ${rateLabel}`,
-            type: rateType,
-            priceInCents: Math.round(price * 100),
-            currency: 'ZAR',
-            usageLimitPerPeriod: isCoop ? turnsPerMonth : null,
-            periodUnit: isCoop ? 'month' : rateType === 'hourly' ? 'hour' : 'day',
-            periodDuration: 1,
-            isActive: true,
-          },
-        ],
-      });
-
-      onCreate(listing);
+      if (isEdit && initial) {
+        const updated = await api.updateListing(initial.id, {
+          title: title.trim(),
+          description: description.trim(),
+          address,
+          neighborhood,
+          city,
+          images,
+          rules: rules.trim() || null,
+          depositRequiredInCents: Math.max(0, Math.round(deposit * 100)),
+          maxSubscribers: isCoop ? maxHouseholds : 1,
+          visibilityGroupId: circleId !== 'public' ? circleId : null,
+          tiers: [
+            {
+              id: initial.pricingTiers?.[0]?.id,
+              name: isCoop ? `${turnsPerMonth} turns a month` : `Rate ${rateLabel}`,
+              type: rateType,
+              priceInCents: Math.round(price * 100),
+              usageLimitPerPeriod: isCoop ? turnsPerMonth : null,
+              isActive: true,
+            },
+          ],
+        });
+        onUpdate?.(updated);
+      } else {
+        const listing = await api.createListing({
+          title: title.trim(),
+          description: description.trim(),
+          category,
+          address,
+          neighborhood,
+          city,
+          images,
+          rules: rules.trim() || undefined,
+          depositRequiredInCents: Math.max(0, Math.round(deposit * 100)),
+          maxSubscribers: isCoop ? maxHouseholds : 1,
+          accessMethod: isCoop ? 'pin_code' : category === 'room' ? 'pin_code' : 'host_handover',
+          visibilityGroupId: circleId !== 'public' ? circleId : null,
+          pricingTiers: [
+            {
+              name: isCoop ? `${turnsPerMonth} turns a month` : `Rate ${rateLabel}`,
+              type: rateType,
+              priceInCents: Math.round(price * 100),
+              currency: 'ZAR',
+              usageLimitPerPeriod: isCoop ? turnsPerMonth : null,
+              periodUnit: isCoop ? 'month' : rateType === 'hourly' ? 'hour' : 'day',
+              periodDuration: 1,
+              isActive: true,
+            },
+          ],
+        });
+        onCreate?.(listing);
+      }
       onClose();
     } catch (err: any) {
-      setError(err?.message || 'We could not publish your listing. Please try again.');
+      setError(err?.message || 'We could not save your listing. Please try again.');
     } finally {
       setIsSubmitting(false);
     }
@@ -157,9 +188,11 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({ circles,
             </div>
             <div>
               <h2 id="create-title" className="text-sm font-bold text-slate-900">
-                Share something
+                {isEdit ? 'Edit listing' : 'Share something'}
               </h2>
-              <p className="text-[11px] text-slate-500">Earn from the things you already own</p>
+              <p className="text-[11px] text-slate-500">
+                {isEdit ? 'Update details, rates or availability' : 'Earn from the things you already own'}
+              </p>
             </div>
           </div>
           <button type="button" aria-label="Close" onClick={onClose} className="p-1.5 rounded-full text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors">
@@ -414,7 +447,7 @@ export const CreateListingModal: React.FC<CreateListingModalProps> = ({ circles,
             className="w-full py-3 px-4 rounded-xl font-bold text-sm text-white bg-slate-900 hover:bg-slate-800 disabled:opacity-60 disabled:cursor-not-allowed shadow-xs transition-all flex items-center justify-center gap-2 cursor-pointer"
           >
             {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4 text-emerald-400" />}
-            <span>{isSubmitting ? 'Publishing…' : 'Publish listing'}</span>
+            <span>{isSubmitting ? (isEdit ? 'Saving…' : 'Publishing…') : isEdit ? 'Save changes' : 'Publish listing'}</span>
           </button>
         </form>
       </div>

@@ -86,45 +86,63 @@ export const ProximityFeed: React.FC<ProximityFeedProps> = ({
         </div>
       )}
 
+      {/* Skeleton Loading State */}
+      {isLoading && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-3 gap-5">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <div key={i} className="bg-white rounded-2xl border border-slate-200/80 overflow-hidden shadow-2xs animate-pulse">
+              <div className="aspect-[4/3] bg-slate-200/70" />
+              <div className="p-4 space-y-3">
+                <div className="h-4 bg-slate-200 rounded-md w-3/4" />
+                <div className="h-3 bg-slate-100 rounded-md w-1/2" />
+                <div className="flex justify-between items-center pt-2">
+                  <div className="h-4 bg-slate-200 rounded-md w-1/4" />
+                  <div className="h-4 bg-slate-100 rounded-md w-1/3" />
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* Empty State */}
       {listings.length === 0 && !isLoading && (
-        <div className="flex flex-col items-center justify-center py-16 px-4 bg-white rounded-3xl border border-slate-200 text-center shadow-2xs">
-          <div className="w-14 h-14 rounded-2xl bg-slate-100 flex items-center justify-center text-slate-400 mb-4">
-            <Compass className="w-7 h-7 text-indigo-600" />
+        <div className="flex flex-col items-center justify-center py-16 px-4 bg-white rounded-3xl border border-slate-200/90 text-center shadow-2xs">
+          <div className="w-16 h-16 rounded-3xl bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-600 mb-4 shadow-2xs">
+            <Sparkles className="w-8 h-8 text-indigo-600" />
           </div>
           <h3 className="text-lg font-bold text-slate-900 mb-1">
-            Nothing here yet
+            Be the first to share in your neighbourhood
           </h3>
           <p className="text-xs sm:text-sm text-slate-500 max-w-md mb-6 leading-relaxed">
             {isGeoActive
-              ? `We couldn't find anything within ${radiusKm} km of ${locationState.label}. Try searching a little further out.`
-              : 'Nothing matches that search. Try another word or category.'}
+              ? `We couldn't find items within ${radiusKm} km of ${locationState.label}. List something to start sharing with neighbours!`
+              : 'Turn your unused tools, appliances, or camping equipment into monthly income and community value.'}
           </p>
           <div className="flex flex-wrap items-center justify-center gap-3">
+            <button
+              type="button"
+              onClick={onResetFilters}
+              className="px-4 py-2.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl border border-slate-200 transition-colors cursor-pointer"
+            >
+              Reset filters
+            </button>
             {isGeoActive && radiusKm < 50 && (
               <button
                 id="empty-expand-radius-btn"
                 type="button"
                 onClick={() => onExpandRadius(50)}
-                className="px-4 py-2 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-xl shadow-xs transition-colors cursor-pointer"
+                className="px-4 py-2.5 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-xl shadow-xs transition-colors cursor-pointer"
               >
-                Search within 50 km
+                Expand search (50 km)
               </button>
             )}
-            <button
-              id="empty-reset-filters-btn"
-              type="button"
-              onClick={onResetFilters}
-              className="px-4 py-2 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl border border-slate-200/80 transition-colors cursor-pointer"
-            >
-              Clear filters
-            </button>
           </div>
         </div>
       )}
 
       {/* Listings Grid */}
-      {listings.length > 0 && (
+      {!isLoading && listings.length > 0 && (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-3 gap-5">
           {listings.map((listing) => (
             <ListingCard

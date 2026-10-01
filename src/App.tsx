@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useTransition, useCallback, lazy, Suspense } from 'react';
-import { CheckCircle2, Info, Users, X } from 'lucide-react';
+import { CheckCircle2, Info, Users, X, ShieldAlert, Loader2 } from 'lucide-react';
 import { Navbar } from './components/layout/Navbar';
 import { MobileNav, MobileTab } from './components/layout/MobileNav';
 import { PwaInstallBanner } from './components/layout/PwaInstallBanner';
@@ -11,10 +11,13 @@ import { ListingDetailModal } from './components/listings/ListingDetailModal';
 import { FractionalUsageLogger } from './components/usage/FractionalUsageLogger';
 import { CreateListingModal } from './components/listings/CreateListingModal';
 import { AuthModal } from './components/auth/AuthModal';
+import { AuthGate } from './components/auth/AuthGate';
 import { EscrowPaymentModal } from './components/payments/EscrowPaymentModal';
 import { ReviewModal } from './components/reviews/ReviewModal';
 import { ReturnHandoverModal } from './components/bookings/ReturnHandoverModal';
 import { TrustGroupHub } from './components/groups/TrustGroupHub';
+import { DashboardPage } from './pages/DashboardPage';
+import { useRoute, parseMeSection, parseAdminTab } from './lib/router';
 import { api, submitCheckout } from './api/client';
 import {
   ListingModel,
@@ -62,10 +65,11 @@ function parseInitialUrlParams() {
 
 export default function App() {
   const [initialParams] = useState(parseInitialUrlParams);
+  const { path, navigate } = useRoute();
 
-  // The session lives in an HTTP-only cookie; the server says who is signed in.
-  // Admin-only screens stay closed until the server has confirmed the role.
+  // Authentication session state
   const [currentUser, setCurrentUser] = useState<UserModel | null>(null);
+  const [isAuthChecking, setIsAuthChecking] = useState(true);
   const isAdmin = currentUser?.role === 'ADMIN';
 
   // Discovery filters
@@ -91,11 +95,11 @@ export default function App() {
 
   // Screens & modals
   const [selectedListing, setSelectedListing] = useState<ListingModel | null>(null);
+  const [editingListing, setEditingListing] = useState<ListingModel | null>(null);
   const [showActivity, setShowActivity] = useState(false);
   const [showArchitectureModal, setShowArchitectureModal] = useState(false);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showAuthModal, setShowAuthModal] = useState(false);
-  const [showAdminDashboard, setShowAdminDashboard] = useState(false);
   const [paymentBooking, setPaymentBooking] = useState<BookingModel | null>(null);
   const [reviewBooking, setReviewBooking] = useState<BookingModel | null>(null);
   const [returnBooking, setReturnBooking] = useState<BookingModel | null>(null);
@@ -110,26 +114,23 @@ export default function App() {
     window.setTimeout(() => setToast((t) => (t?.message === message ? null : t)), 4000);
   }, []);
 
-  // Who is signed in (from the session cookie). Opens the admin view if the
-  // address asked for it and the server confirms the role.
+  // Who is signed in (from the session cookie).
   useEffect(() => {
     api
       .session()
       .then(({ user }) => {
         setCurrentUser(user);
-        if (user?.role === 'ADMIN' && initialParams.wantsAdmin) setShowAdminDashboard(true);
+        if (user?.role === 'ADMIN' && initialParams.wantsAdmin) {
+          navigate('/admin');
+        }
       })
-      .catch(() => setCurrentUser(null));
-  }, [initialParams.wantsAdmin]);
+      .catch(() => setCurrentUser(null))
+      .finally(() => setIsAuthChecking(false));
+  }, [initialParams.wantsAdmin, navigate]);
 
-  // Never leave the admin view open for someone who is not an admin
-  // (e.g. after signing out or switching accounts).
+  // Keep the address bar in step with filters so searches can be shared (marketplace home view only).
   useEffect(() => {
-    if (!isAdmin && showAdminDashboard) setShowAdminDashboard(false);
-  }, [isAdmin, showAdminDashboard]);
-
-  // Keep the address bar in step with filters so searches can be shared.
-  useEffect(() => {
+    if (path !== '/') return;
     const params = new URLSearchParams();
     if (selectedCategory && selectedCategory !== 'all') params.set('category', selectedCategory);
     if (selectedSubcategory) params.set('sub', selectedSubcategory);
@@ -142,11 +143,10 @@ export default function App() {
     }
     if (cityFilter && cityFilter !== 'all') params.set('city', cityFilter);
     if (selectedTrustGroupId) params.set('group', selectedTrustGroupId);
-    if (showAdminDashboard && isAdmin) params.set('view', 'admin');
 
     const query = params.toString();
     window.history.replaceState(null, '', `/${query ? '?' + query : ''}`);
-  }, [selectedCategory, selectedSubcategory, searchQuery, locationState, radiusKm, cityFilter, selectedTrustGroupId, showAdminDashboard, isAdmin]);
+  }, [path, selectedCategory, selectedSubcategory, searchQuery, locationState, radiusKm, cityFilter, selectedTrustGroupId]);
 
   // --- Loading member data ---
 
@@ -162,20 +162,22 @@ export default function App() {
   }, [currentUser]);
 
   useEffect(() => {
-    refreshActivity();
-    refreshCircles();
-  }, [refreshActivity, refreshCircles]);
+    if (currentUser) {
+      refreshActivity();
+      refreshCircles();
+    }
+  }, [currentUser, refreshActivity, refreshCircles]);
 
-  // Back from PayFast: the payment notification usually lands within seconds,
-  // so check a few times before telling the member it is still processing.
+  // Back from PayFast: the payment notification usually lands within seconds.
   useEffect(() => {
     const outcome = initialParams.paymentReturn;
     if (!outcome || !currentUser) return;
     if (outcome === 'cancelled') {
       showToast('Payment cancelled. Your booking is held for 30 minutes if you want to try again.', 'info');
+      navigate('/me/rentals');
       return;
     }
-    setShowActivity(true);
+    navigate('/me/rentals');
     showToast("Thanks! We're confirming your payment with PayFast…", 'info');
     let attempts = 0;
     const timer = window.setInterval(async () => {
@@ -191,9 +193,7 @@ export default function App() {
       }
     }, 3000);
     return () => window.clearInterval(timer);
-    // Runs once, when the signed-in member first loads after returning.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentUser?.id]);
+  }, [currentUser?.id, initialParams.paymentReturn, navigate, refreshActivity, showToast]);
 
   const [searchError, setSearchError] = useState<string | null>(null);
   const runSearch = useCallback(() => {
@@ -214,18 +214,13 @@ export default function App() {
         setSearchError(err?.message || 'We could not load listings.');
       }
     });
-    // currentUser: signing in or out changes which private listings are visible.
-  }, [searchQuery, selectedCategory, selectedSubcategory, locationState, radiusKm, cityFilter, selectedTrustGroupId, currentUser]);
+  }, [searchQuery, selectedCategory, selectedSubcategory, locationState, radiusKm, cityFilter, selectedTrustGroupId]);
 
   useEffect(() => {
-    runSearch();
-  }, [runSearch]);
-
-  /** Re-reads the open listing after something changed it (a new member, a booking). */
-  const refreshSelectedListing = async (listingId: string) => {
-    const fresh = await api.getListing(listingId).catch(() => null);
-    setSelectedListing((open) => (open?.id === listingId ? fresh : open));
-  };
+    if (currentUser) {
+      runSearch();
+    }
+  }, [currentUser, runSearch]);
 
   // --- Filters ---
 
@@ -250,7 +245,7 @@ export default function App() {
     locationState.latitude !== null ||
     cityFilter !== 'all';
 
-  // --- Member actions. Each throws a friendly Error the calling screen shows inline. ---
+  // --- Member actions ---
 
   const requireSignIn = (): UserModel | null => {
     if (currentUser) return currentUser;
@@ -262,7 +257,6 @@ export default function App() {
   const handleJoinCoop = async (listing: ListingModel, tier: PricingTierModel) => {
     const user = requireSignIn();
     if (!user) return;
-    // Membership starts once PayFast confirms the first payment.
     const { checkout } = await api.joinCoop(listing.id, tier.id);
     submitCheckout(checkout);
   };
@@ -270,7 +264,6 @@ export default function App() {
   const handleBook = async (listing: ListingModel, tier: PricingTierModel, start: Date, end: Date) => {
     const user = requireSignIn();
     if (!user) return;
-    // The dates are held for 30 minutes while the member pays on PayFast.
     const { checkout } = await api.createBooking({
       listingId: listing.id,
       tierId: tier.id,
@@ -295,7 +288,7 @@ export default function App() {
     showToast('Pickup confirmed. Enjoy!');
   };
 
-  // --- Account ---
+  // --- Account & Auth ---
 
   const handleAuthSuccess = (session: AuthSession) => {
     if (!session.user) return;
@@ -308,8 +301,10 @@ export default function App() {
     setCurrentUser(null);
     setShowActivity(false);
     setShowCreateModal(false);
+    setEditingListing(null);
     setSelectedTrustGroupId(null);
     setSelectedTrustGroupName(null);
+    navigate('/');
     showToast('You have signed out.', 'info');
   };
 
@@ -324,7 +319,9 @@ export default function App() {
   };
 
   const openActivity = () => {
-    if (requireSignIn()) setShowActivity(true);
+    if (requireSignIn()) {
+      navigate('/me/rentals');
+    }
   };
 
   const openCreateListing = () => {
@@ -333,6 +330,52 @@ export default function App() {
 
   const pendingPickups = activity.bookings.filter((b) => b.status === 'PENDING_HANDOVER').length;
   const activityBadge = activity.subscriptions.length + pendingPickups;
+
+  // 1. Initial Auth Checking Screen
+  if (isAuthChecking) {
+    return (
+      <div className="min-h-screen bg-gradient-to-b from-slate-950 via-slate-900 to-indigo-950 flex flex-col items-center justify-center text-white selection:bg-emerald-500/30 selection:text-emerald-200">
+        <div className="flex flex-col items-center gap-4 animate-pulse">
+          <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-emerald-400 to-teal-500 text-slate-950 flex items-center justify-center font-black text-2xl shadow-xl shadow-emerald-500/20">
+            S
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="font-extrabold tracking-tight text-white text-lg">
+              Share<span className="text-emerald-400">Hub</span>
+            </span>
+          </div>
+          <p className="text-xs text-slate-400 font-medium">Cape Town's Community Marketplace</p>
+          <div className="w-6 h-6 border-2 border-emerald-400 border-t-transparent rounded-full animate-spin mt-3" />
+        </div>
+      </div>
+    );
+  }
+
+  // 2. Mandatory Sign-up / Sign-in Gate
+  if (!currentUser) {
+    return (
+      <>
+        {toast && (
+          <div
+            role="status"
+            className="fixed top-6 right-4 left-4 sm:left-auto sm:right-6 z-[70] p-4 rounded-xl bg-slate-900 text-white shadow-xl flex items-center gap-3 border border-slate-800 animate-in slide-in-from-top-3"
+          >
+            {toast.tone === 'success' ? (
+              <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
+            ) : (
+              <Info className="w-5 h-5 text-sky-400 shrink-0" />
+            )}
+            <span className="text-xs font-medium">{toast.message}</span>
+          </div>
+        )}
+        <AuthGate onAuthSuccess={handleAuthSuccess} />
+      </>
+    );
+  }
+
+  // 3. Authenticated App Experience
+  const isMeRoute = path.startsWith('/me');
+  const isAdminRoute = path.startsWith('/admin');
 
   return (
     <div className="min-h-screen bg-[#fcfcfd] text-slate-900 flex flex-col selection:bg-indigo-100 selection:text-indigo-900 pb-20 md:pb-0">
@@ -362,85 +405,151 @@ export default function App() {
         currentUser={currentUser}
         onOpenAuth={() => setShowAuthModal(true)}
         onSignOut={handleSignOut}
-        onOpenAdminDashboard={() => setShowAdminDashboard(true)}
+        onOpenAdminDashboard={() => navigate('/admin')}
+        onNavigateHome={() => navigate('/')}
+        onNavigateDashboard={(sec) => navigate(sec && sec !== 'overview' ? `/me/${sec}` : '/me')}
         onSwitchDemoAccount={import.meta.env.DEV ? handleSwitchDemoAccount : undefined}
         onOpenArchitecture={import.meta.env.DEV ? () => setShowArchitectureModal(true) : undefined}
       />
 
-      <CategoryNav
-        selectedCategorySlug={selectedCategory}
-        selectedSubcategorySlug={selectedSubcategory}
-        onSelectCategory={handleSelectCategory}
-        totalListingsCount={listings.length}
-      />
-
-      <SearchHeader
-        searchTerm={searchQuery}
-        onSearchTermChange={setSearchQuery}
-        locationState={locationState}
-        onLocationChange={(partial) => setLocationState((prev) => ({ ...prev, ...partial }))}
-        radiusKm={radiusKm}
-        onRadiusChange={setRadiusKm}
-        cityFilter={cityFilter}
-        onCityFilterChange={setCityFilter}
-        onResetFilters={handleResetFilters}
-        hasActiveFilters={hasActiveFilters}
-        totalResultsCount={listings.length}
-      />
-
-      {selectedTrustGroupId && (
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-3 w-full">
-          <div className="p-3.5 bg-emerald-50 border border-emerald-200 rounded-2xl flex flex-wrap items-center justify-between gap-2 shadow-2xs">
-            <div className="flex items-center gap-2.5">
-              <div className="p-1.5 bg-emerald-100 text-emerald-700 rounded-lg">
-                <Users className="w-4 h-4" />
-              </div>
-              <span className="text-xs sm:text-sm font-semibold text-emerald-950">
-                Showing listings from <strong className="font-bold text-emerald-900">{selectedTrustGroupName || 'your circle'}</strong>
-              </span>
-            </div>
-            <button
-              type="button"
-              onClick={() => {
-                setSelectedTrustGroupId(null);
-                setSelectedTrustGroupName(null);
-              }}
-              className="text-xs font-bold text-emerald-700 hover:text-emerald-900 underline cursor-pointer"
+      {/* Main Routed Content */}
+      {isAdminRoute ? (
+        isAdmin ? (
+          <main className="flex-1 w-full py-6">
+            <Suspense
+              fallback={
+                <div className="min-h-[50vh] flex flex-col items-center justify-center text-slate-500 gap-3">
+                  <Loader2 className="w-6 h-6 animate-spin text-purple-600" />
+                  <span className="text-sm font-semibold">Loading admin console…</span>
+                </div>
+              }
             >
-              Show everything
+              <AdminDashboard
+                isPage
+                currentUser={currentUser}
+                initialTab={parseAdminTab(path)}
+                onSelectTab={(tab) => navigate(`/admin/${tab}`)}
+                onClose={() => navigate('/')}
+                onViewListing={(l) => setSelectedListing(l)}
+              />
+            </Suspense>
+          </main>
+        ) : (
+          <main className="max-w-xl mx-auto my-20 p-8 bg-white rounded-3xl border border-slate-200 text-center shadow-lg">
+            <ShieldAlert className="w-12 h-12 text-rose-500 mx-auto mb-3" />
+            <h2 className="text-xl font-black text-slate-900 mb-2">Admin Access Required</h2>
+            <p className="text-sm text-slate-600 mb-6">You must be an administrator to view this area.</p>
+            <button
+              onClick={() => navigate('/')}
+              className="px-5 py-2.5 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-xl text-sm transition-all cursor-pointer"
+            >
+              Return to marketplace
             </button>
-          </div>
-        </div>
+          </main>
+        )
+      ) : isMeRoute ? (
+        <main className="flex-1 w-full py-6">
+          <DashboardPage
+            currentUser={currentUser}
+            initialSection={parseMeSection(path)}
+            onNavigateSection={(sec) => navigate(sec === 'overview' ? '/me' : `/me/${sec}`)}
+            onBackToHome={() => navigate('/')}
+            activity={activity}
+            refreshActivity={refreshActivity}
+            circles={myCircles}
+            onOpenCreateListing={openCreateListing}
+            onEditListing={(listing) => setEditingListing(listing)}
+            onViewListing={(listing) => setSelectedListing(listing)}
+            onPay={(booking) => setPaymentBooking(booking)}
+            onCheckReturn={(booking) => setReturnBooking(booking)}
+            onReview={(booking) => setReviewBooking(booking)}
+            onSignOut={handleSignOut}
+            onUserUpdated={(updatedUser) => {
+              setCurrentUser(updatedUser);
+              showToast('Profile updated!');
+            }}
+            showToast={showToast}
+          />
+        </main>
+      ) : (
+        <>
+          <CategoryNav
+            selectedCategorySlug={selectedCategory}
+            selectedSubcategorySlug={selectedSubcategory}
+            onSelectCategory={handleSelectCategory}
+            totalListingsCount={listings.length}
+          />
+
+          <SearchHeader
+            searchTerm={searchQuery}
+            onSearchTermChange={setSearchQuery}
+            locationState={locationState}
+            onLocationChange={(partial) => setLocationState((prev) => ({ ...prev, ...partial }))}
+            radiusKm={radiusKm}
+            onRadiusChange={setRadiusKm}
+            cityFilter={cityFilter}
+            onCityFilterChange={setCityFilter}
+            onResetFilters={handleResetFilters}
+            hasActiveFilters={hasActiveFilters}
+            totalResultsCount={listings.length}
+          />
+
+          {selectedTrustGroupId && (
+            <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-3 w-full">
+              <div className="p-3.5 bg-emerald-50 border border-emerald-200 rounded-2xl flex flex-wrap items-center justify-between gap-2 shadow-2xs">
+                <div className="flex items-center gap-2.5">
+                  <div className="p-1.5 bg-emerald-100 text-emerald-700 rounded-lg">
+                    <Users className="w-4 h-4" />
+                  </div>
+                  <span className="text-xs sm:text-sm font-semibold text-emerald-950">
+                    Showing listings from <strong className="font-bold text-emerald-900">{selectedTrustGroupName || 'your circle'}</strong>
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedTrustGroupId(null);
+                    setSelectedTrustGroupName(null);
+                  }}
+                  className="text-xs font-bold text-emerald-700 hover:text-emerald-900 underline cursor-pointer"
+                >
+                  Show everything
+                </button>
+              </div>
+            </div>
+          )}
+
+          <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-7 flex-1 w-full">
+            {searchError && (
+              <div role="alert" className="mb-5 p-4 rounded-2xl bg-rose-50 border border-rose-200 text-sm text-rose-800 flex flex-wrap items-center justify-between gap-2">
+                <span>{searchError}</span>
+                <button type="button" onClick={runSearch} className="font-bold underline cursor-pointer">
+                  Try again
+                </button>
+              </div>
+            )}
+            <ProximityFeed
+              listings={listings}
+              locationState={locationState}
+              radiusKm={radiusKm}
+              selectedCategorySlug={selectedCategory}
+              selectedSubcategorySlug={selectedSubcategory}
+              searchTerm={searchQuery}
+              onSelectListing={(l) => setSelectedListing(l)}
+              isSubscribedCheck={(listingId) => activity.subscriptions.some((s) => s.listingId === listingId)}
+              onExpandRadius={(newRadius) => setRadiusKm(newRadius)}
+              onResetFilters={handleResetFilters}
+              isLoading={isPending}
+            />
+          </main>
+        </>
       )}
 
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-7 flex-1 w-full">
-        {searchError && (
-          <div role="alert" className="mb-5 p-4 rounded-2xl bg-rose-50 border border-rose-200 text-sm text-rose-800 flex flex-wrap items-center justify-between gap-2">
-            <span>{searchError}</span>
-            <button type="button" onClick={runSearch} className="font-bold underline cursor-pointer">
-              Try again
-            </button>
-          </div>
-        )}
-        <ProximityFeed
-          listings={listings}
-          locationState={locationState}
-          radiusKm={radiusKm}
-          selectedCategorySlug={selectedCategory}
-          selectedSubcategorySlug={selectedSubcategory}
-          searchTerm={searchQuery}
-          onSelectListing={(l) => setSelectedListing(l)}
-          isSubscribedCheck={(listingId) => activity.subscriptions.some((s) => s.listingId === listingId)}
-          onExpandRadius={(newRadius) => setRadiusKm(newRadius)}
-          onResetFilters={handleResetFilters}
-          isLoading={isPending}
-        />
-      </main>
-
+      {/* Listing Detail Modal */}
       {selectedListing && (
         <ListingDetailModal
           listing={selectedListing}
-          currentUserId={currentUser?.id ?? null}
+          currentUserId={currentUser.id}
           userSubscription={activity.subscriptions.find((s) => s.listingId === selectedListing.id)}
           onClose={() => setSelectedListing(null)}
           onJoinCoop={handleJoinCoop}
@@ -450,7 +559,8 @@ export default function App() {
         />
       )}
 
-      {showActivity && currentUser && (
+      {/* Quick Activity Modal (fallback) */}
+      {showActivity && (
         <FractionalUsageLogger
           activity={activity}
           onClose={() => setShowActivity(false)}
@@ -463,7 +573,8 @@ export default function App() {
         />
       )}
 
-      {returnBooking && currentUser && (
+      {/* Return Handover Modal */}
+      {returnBooking && (
         <ReturnHandoverModal
           isOpen
           booking={returnBooking}
@@ -479,6 +590,7 @@ export default function App() {
         />
       )}
 
+      {/* Circles Modal */}
       {showCircles && (
         <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-3 sm:p-6 animate-in fade-in duration-200">
           <div className="relative w-full max-w-4xl bg-white rounded-2xl sm:rounded-3xl shadow-2xl border border-slate-200/90 overflow-hidden flex flex-col max-h-[calc(100dvh-2rem)]">
@@ -501,7 +613,7 @@ export default function App() {
 
             <div className="p-6 overflow-y-auto flex-1">
               <TrustGroupHub
-                currentUserId={currentUser?.id ?? null}
+                currentUserId={currentUser.id}
                 activeSelectedGroupId={selectedTrustGroupId}
                 onRequireSignIn={() => {
                   setShowCircles(false);
@@ -520,11 +632,13 @@ export default function App() {
         </div>
       )}
 
-      {paymentBooking && currentUser && (
+      {/* Escrow Payment Modal */}
+      {paymentBooking && (
         <EscrowPaymentModal isOpen booking={paymentBooking} onClose={() => setPaymentBooking(null)} />
       )}
 
-      {reviewBooking && currentUser && (
+      {/* Review Modal */}
+      {reviewBooking && (
         <ReviewModal
           isOpen
           booking={reviewBooking}
@@ -537,47 +651,55 @@ export default function App() {
         />
       )}
 
+      {/* Architecture Viewer (Dev only) */}
       {ArchitectureViewer && showArchitectureModal && (
         <Suspense fallback={null}>
           <ArchitectureViewer onClose={() => setShowArchitectureModal(false)} />
         </Suspense>
       )}
 
-      {showCreateModal && currentUser && (
+      {/* Create Listing Modal */}
+      {showCreateModal && (
         <CreateListingModal
           circles={myCircles}
           onClose={() => setShowCreateModal(false)}
           onCreate={(listing) => {
             runSearch();
+            refreshActivity();
             showToast(`"${listing.title}" is live. Nice one!`);
+          }}
+        />
+      )}
+
+      {/* Edit Listing Modal */}
+      {editingListing && (
+        <CreateListingModal
+          circles={myCircles}
+          initial={editingListing}
+          onClose={() => setEditingListing(null)}
+          onUpdate={(listing) => {
+            setEditingListing(null);
+            runSearch();
+            refreshActivity();
+            showToast(`Listing "${listing.title}" updated.`);
           }}
         />
       )}
 
       <AuthModal isOpen={showAuthModal} onClose={() => setShowAuthModal(false)} onAuthSuccess={handleAuthSuccess} />
 
-      {isAdmin && showAdminDashboard && currentUser && (
-        <Suspense
-          fallback={
-            <div className="fixed inset-0 z-50 bg-slate-950/70 flex items-center justify-center text-sm text-white">
-              Loading…
-            </div>
-          }
-        >
-          <AdminDashboard currentUser={currentUser} onClose={() => setShowAdminDashboard(false)} />
-        </Suspense>
-      )}
-
       <Footer />
 
       <MobileNav
-        activeTab={mobileTab}
+        activeTab={isMeRoute ? 'activity' : mobileTab}
         onSelectTab={setMobileTab}
         activityCount={activityBadge}
         currentUser={currentUser}
         onOpenCreateListing={openCreateListing}
         onOpenCircles={() => setShowCircles(true)}
         onOpenActivity={openActivity}
+        onNavigateHome={() => navigate('/')}
+        onNavigateDashboard={(sec) => navigate(sec && sec !== 'overview' ? `/me/${sec}` : '/me')}
       />
     </div>
   );

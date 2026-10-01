@@ -68,7 +68,7 @@ function load() {
 
     /** Firebase Storage for photos and nightly backups (optional). */
     firebase: {
-      bucket: env.FIREBASE_STORAGE_BUCKET || '',
+      bucket: env.FIREBASE_STORAGE_BUCKET || 'studio-5687996797-777f2.firebasestorage.app',
       /** Service-account JSON key, base64-encoded (never commit it). */
       serviceAccountBase64: env.FIREBASE_SERVICE_ACCOUNT_BASE64 || '',
     },

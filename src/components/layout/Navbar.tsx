@@ -15,6 +15,8 @@ export interface NavbarProps {
   onOpenAuth: () => void;
   onSignOut: () => void;
   onOpenAdminDashboard: () => void;
+  onNavigateHome?: () => void;
+  onNavigateDashboard?: (section?: string) => void;
   /** Development builds only. */
   onSwitchDemoAccount?: (role: UserRole) => void;
   /** Development builds only. */
@@ -32,6 +34,8 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenAuth,
   onSignOut,
   onOpenAdminDashboard,
+  onNavigateHome,
+  onNavigateDashboard,
   onSwitchDemoAccount,
   onOpenArchitecture,
 }) => {
@@ -42,7 +46,12 @@ export const Navbar: React.FC<NavbarProps> = ({
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex items-center justify-between h-16 gap-3 sm:gap-4">
           {/* Logo */}
-          <a href="/" className="flex items-center gap-2.5 sm:gap-3 shrink-0" aria-label="ShareHub home">
+          <button
+            type="button"
+            onClick={onNavigateHome ? onNavigateHome : undefined}
+            className="flex items-center gap-2.5 sm:gap-3 shrink-0 cursor-pointer text-left"
+            aria-label="ShareHub home"
+          >
             <div className="w-9 h-9 rounded-xl bg-slate-900 flex items-center justify-center text-white shadow-xs">
               <Zap className="w-4.5 h-4.5 text-amber-400" />
             </div>
@@ -54,7 +63,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                 Borrow more, buy less
               </p>
             </div>
-          </a>
+          </button>
 
           {/* Search */}
           <div className="flex-1 max-w-md hidden md:block">
@@ -143,6 +152,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                 onSignOut={onSignOut}
                 onOpenAdminDashboard={onOpenAdminDashboard}
                 onOpenActivity={onOpenActivity}
+                onNavigateDashboard={onNavigateDashboard}
                 onSwitchDemoAccount={onSwitchDemoAccount}
                 onOpenArchitecture={onOpenArchitecture}
               />

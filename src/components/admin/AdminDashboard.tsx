@@ -28,18 +28,35 @@ import {
   X,
   ExternalLink,
   Shield,
+  Eye,
+  UserCheck,
+  UserX,
 } from 'lucide-react';
-import { AdminAnalyticsReport, SystemLogModel, UserModel } from '../../types';
-import { api } from '../../api/client';
+import { AdminAnalyticsReport, ListingModel, SystemLogModel, UserModel } from '../../types';
+import { AdminListingRow, AdminMemberRow, api } from '../../api/client';
 import { PaymentsPanel } from './PaymentsPanel';
 import { formatCurrency } from '../../lib/utils';
 import { cn } from '../../lib/utils';
 
 const CategoryRevenueChart = lazy(() => import('./CategoryRevenueChart'));
 
+export type AdminTab =
+  | 'payments'
+  | 'members'
+  | 'listings'
+  | 'analytics'
+  | 'neighbourhoods'
+  | 'velocity'
+  | 'appliances'
+  | 'audit';
+
 export interface AdminDashboardProps {
   currentUser: UserModel;
-  onClose: () => void;
+  onClose?: () => void;
+  isPage?: boolean;
+  initialTab?: AdminTab;
+  onSelectTab?: (tab: AdminTab) => void;
+  onViewListing?: (listing: ListingModel) => void;
 }
 
 const rand = (zar: number) => formatCurrency(Math.round(zar * 100));
@@ -48,15 +65,30 @@ const rand = (zar: number) => formatCurrency(Math.round(zar * 100));
  * Operator dashboard. App only mounts this for admins, and the report action
  * re-checks the requester's role before returning any data.
  */
-export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUser, onClose }) => {
+export const AdminDashboard: React.FC<AdminDashboardProps> = ({
+  currentUser,
+  onClose,
+  isPage = false,
+  initialTab = 'payments',
+  onSelectTab,
+  onViewListing,
+}) => {
   const [dateRange, setDateRange] = useState<'7d' | '30d' | '90d' | 'all'>('30d');
-  const [activeTab, setActiveTab] = useState<'analytics' | 'velocity' | 'neighbourhoods' | 'appliances' | 'payments' | 'audit'>(
-    'analytics'
-  );
+  const [activeTab, setActiveTab] = useState<AdminTab>(initialTab);
   const [report, setReport] = useState<AdminAnalyticsReport | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
+
+  // Members Management State
+  const [members, setMembers] = useState<AdminMemberRow[]>([]);
+  const [memberSearch, setMemberSearch] = useState('');
+  const [isMembersLoading, setIsMembersLoading] = useState(false);
+
+  // Listings Management State
+  const [adminListings, setAdminListings] = useState<AdminListingRow[]>([]);
+  const [listingSearch, setListingSearch] = useState('');
+  const [isListingsLoading, setIsListingsLoading] = useState(false);
 
   // Audit Log State
   const [logFilter, setLogFilter] = useState<string>('ALL');
@@ -88,6 +120,58 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUser, onC
     fetchReport();
   }, [dateRange]);
 
+  const fetchMembers = React.useCallback(async () => {
+    if (!isAdmin) return;
+    setIsMembersLoading(true);
+    try {
+      const data = await api.adminMembers(memberSearch);
+      setMembers(data);
+    } catch {
+      // Ignored
+    } finally {
+      setIsMembersLoading(false);
+    }
+  }, [isAdmin, memberSearch]);
+
+  const fetchListings = React.useCallback(async () => {
+    if (!isAdmin) return;
+    setIsListingsLoading(true);
+    try {
+      const data = await api.adminListings(listingSearch);
+      setAdminListings(data);
+    } catch {
+      // Ignored
+    } finally {
+      setIsListingsLoading(false);
+    }
+  }, [isAdmin, listingSearch]);
+
+  useEffect(() => {
+    if (activeTab === 'members') fetchMembers();
+  }, [activeTab, fetchMembers]);
+
+  useEffect(() => {
+    if (activeTab === 'listings') fetchListings();
+  }, [activeTab, fetchListings]);
+
+  const handleToggleVerifiedRole = async (userId: string, currentRole: string) => {
+    const nextRole = currentRole === 'VERIFIED_HOST' ? 'USER' : 'VERIFIED_HOST';
+    await api.setMemberRole(userId, nextRole);
+    await fetchMembers();
+  };
+
+  const handleToggleSuspend = async (userId: string, isSuspended: boolean, userName: string) => {
+    const action = isSuspended ? 'unsuspend' : 'suspend';
+    if (!window.confirm(`Are you sure you want to ${action} ${userName}?`)) return;
+    await api.setMemberSuspended(userId, !isSuspended);
+    await fetchMembers();
+  };
+
+  const handleToggleListingVisibility = async (listingId: string, currentAvailable: boolean) => {
+    await api.updateListing(listingId, { isAvailable: !currentAvailable });
+    await fetchListings();
+  };
+
   const handleCopyJson = (obj: any) => {
     navigator.clipboard.writeText(JSON.stringify(obj, null, 2));
     setCopiedJson(true);
@@ -108,10 +192,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUser, onC
     return matchesFilter && matchesSearch;
   }) || [];
 
-  return (
-    <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-2 sm:p-4 md:p-6 animate-in fade-in duration-200">
-      <div className="relative w-full max-w-7xl bg-[#f8fafc] rounded-2xl sm:rounded-3xl shadow-2xl border border-slate-200/90 overflow-hidden flex flex-col max-h-[calc(100dvh-2rem)]">
-        {/* Top Executive Header */}
+  const dashboardContent = (
+    <div className={cn(
+      'relative w-full max-w-7xl bg-[#f8fafc] rounded-2xl sm:rounded-3xl shadow-2xl border border-slate-200/90 overflow-hidden flex flex-col',
+      isPage ? 'min-h-[calc(100vh-6rem)]' : 'max-h-[calc(100dvh-2rem)]'
+    )}>
+      {/* Top Executive Header */}
         <div className="flex flex-wrap items-center justify-between px-6 py-4 border-b border-slate-200 bg-slate-900 text-white gap-3 shrink-0">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-xl bg-purple-600/90 text-white flex items-center justify-center border border-purple-400/30 shadow-xs">
@@ -173,10 +259,58 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUser, onC
 
         {/* Navigation Tabs */}
         <div className="flex items-center justify-between px-6 py-2.5 bg-white border-b border-slate-200 overflow-x-auto shrink-0">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5 sm:gap-2">
             <button
               type="button"
-              onClick={() => setActiveTab('analytics')}
+              onClick={() => {
+                setActiveTab('payments');
+                onSelectTab?.('payments');
+              }}
+              className={cn(
+                'px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer whitespace-nowrap',
+                activeTab === 'payments' ? 'bg-slate-900 text-white shadow-xs' : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+              )}
+            >
+              <DollarSign className="w-3.5 h-3.5 text-emerald-400" />
+              Payments
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab('members');
+                onSelectTab?.('members');
+              }}
+              className={cn(
+                'px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer whitespace-nowrap',
+                activeTab === 'members' ? 'bg-slate-900 text-white shadow-xs' : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+              )}
+            >
+              <Users className="w-3.5 h-3.5 text-purple-400" />
+              Members
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab('listings');
+                onSelectTab?.('listings');
+              }}
+              className={cn(
+                'px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer whitespace-nowrap',
+                activeTab === 'listings' ? 'bg-slate-900 text-white shadow-xs' : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+              )}
+            >
+              <Layers className="w-3.5 h-3.5 text-sky-400" />
+              Listings
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab('analytics');
+                onSelectTab?.('analytics');
+              }}
               className={cn(
                 'px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer whitespace-nowrap',
                 activeTab === 'analytics'
@@ -190,7 +324,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUser, onC
 
             <button
               type="button"
-              onClick={() => setActiveTab('neighbourhoods')}
+              onClick={() => {
+                setActiveTab('neighbourhoods');
+                onSelectTab?.('neighbourhoods');
+              }}
               className={cn(
                 'px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer whitespace-nowrap',
                 activeTab === 'neighbourhoods'
@@ -204,7 +341,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUser, onC
 
             <button
               type="button"
-              onClick={() => setActiveTab('velocity')}
+              onClick={() => {
+                setActiveTab('velocity');
+                onSelectTab?.('velocity');
+              }}
               className={cn(
                 'px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer whitespace-nowrap',
                 activeTab === 'velocity'
@@ -218,7 +358,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUser, onC
 
             <button
               type="button"
-              onClick={() => setActiveTab('appliances')}
+              onClick={() => {
+                setActiveTab('appliances');
+                onSelectTab?.('appliances');
+              }}
               className={cn(
                 'px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer whitespace-nowrap',
                 activeTab === 'appliances'
@@ -232,19 +375,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUser, onC
 
             <button
               type="button"
-              onClick={() => setActiveTab('payments')}
-              className={cn(
-                'px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer whitespace-nowrap',
-                activeTab === 'payments' ? 'bg-slate-900 text-white shadow-xs' : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
-              )}
-            >
-              <DollarSign className="w-3.5 h-3.5 text-emerald-400" />
-              Payments
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setActiveTab('audit')}
+              onClick={() => {
+                setActiveTab('audit');
+                onSelectTab?.('audit');
+              }}
               className={cn(
                 'px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer whitespace-nowrap',
                 activeTab === 'audit'
@@ -615,9 +749,246 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUser, onC
             </div>
           )}
 
-          {/* TAB 5: SystemLogs Real-Time Operations Stream & JSON Inspector */}
+          {/* TAB: Payments */}
           {activeTab === 'payments' && <PaymentsPanel />}
 
+          {/* TAB: Members */}
+          {activeTab === 'members' && (
+            <div className="space-y-4">
+              <div className="p-4 rounded-2xl bg-white border border-slate-200 flex flex-col sm:flex-row items-center justify-between gap-3 shadow-2xs">
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900">Members Directory</h3>
+                  <p className="text-xs text-slate-500">Manage member privileges, verified hosts, and suspensions</p>
+                </div>
+                <div className="relative w-full sm:w-72">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
+                  <input
+                    type="text"
+                    value={memberSearch}
+                    onChange={(e) => setMemberSearch(e.target.value)}
+                    placeholder="Search name, email..."
+                    className="w-full pl-8 pr-3 py-1.5 text-xs bg-slate-50 rounded-xl border border-slate-200 outline-none"
+                  />
+                </div>
+              </div>
+
+              <div className="overflow-hidden rounded-2xl bg-white border border-slate-200 shadow-2xs">
+                {isMembersLoading ? (
+                  <div className="p-12 text-center text-xs text-slate-400">Loading members…</div>
+                ) : members.length === 0 ? (
+                  <div className="p-12 text-center text-xs text-slate-400">No members found.</div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-slate-50 text-slate-500 font-semibold border-b border-slate-100">
+                        <tr>
+                          <th className="px-6 py-3">Member</th>
+                          <th className="px-4 py-3">Role</th>
+                          <th className="px-4 py-3">Joined</th>
+                          <th className="px-4 py-3">Listings</th>
+                          <th className="px-4 py-3">Bookings</th>
+                          <th className="px-4 py-3">Last Active</th>
+                          <th className="px-4 py-3">Status</th>
+                          <th className="px-6 py-3 text-right">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {members.map((m) => (
+                          <tr key={m.user.id} className="hover:bg-slate-50/80 transition-colors">
+                            <td className="px-6 py-3.5">
+                              <div className="font-bold text-slate-900">{m.user.name}</div>
+                              <div className="text-[11px] text-slate-500">{m.user.email}</div>
+                            </td>
+                            <td className="px-4 py-3.5">
+                              <span
+                                className={cn(
+                                  'px-2 py-0.5 rounded-full text-[10px] font-bold border',
+                                  m.user.role === 'ADMIN'
+                                    ? 'bg-purple-50 text-purple-700 border-purple-200'
+                                    : m.user.role === 'VERIFIED_HOST'
+                                    ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                    : 'bg-slate-100 text-slate-700 border-slate-200'
+                                )}
+                              >
+                                {m.user.role}
+                              </span>
+                            </td>
+                            <td className="px-4 py-3.5 text-slate-600">
+                              {new Date(m.user.createdAt).toLocaleDateString([], { day: 'numeric', month: 'short', year: 'numeric' })}
+                            </td>
+                            <td className="px-4 py-3.5 text-slate-700 font-semibold">{m.listings}</td>
+                            <td className="px-4 py-3.5 text-slate-700 font-semibold">{m.bookings}</td>
+                            <td className="px-4 py-3.5 text-slate-500">
+                              {m.lastActiveAt ? new Date(m.lastActiveAt).toLocaleDateString() : '—'}
+                            </td>
+                            <td className="px-4 py-3.5">
+                              {m.user.suspended ? (
+                                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-50 text-rose-700 border border-rose-200">
+                                  Suspended
+                                </span>
+                              ) : (
+                                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                                  Active
+                                </span>
+                              )}
+                            </td>
+                            <td className="px-6 py-3.5 text-right space-x-2 whitespace-nowrap">
+                              {m.user.role !== 'ADMIN' && (
+                                <>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleToggleVerifiedRole(m.user.id, m.user.role)}
+                                    className="px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] font-bold cursor-pointer transition-colors"
+                                  >
+                                    {m.user.role === 'VERIFIED_HOST' ? 'Remove verified' : 'Make verified'}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleToggleSuspend(m.user.id, !!m.user.suspended, m.user.name)}
+                                    className={cn(
+                                      'px-2.5 py-1 rounded-lg text-[11px] font-bold cursor-pointer transition-colors',
+                                      m.user.suspended
+                                        ? 'bg-emerald-50 hover:bg-emerald-100 text-emerald-700'
+                                        : 'bg-rose-50 hover:bg-rose-100 text-rose-700'
+                                    )}
+                                  >
+                                    {m.user.suspended ? 'Unsuspend' : 'Suspend'}
+                                  </button>
+                                </>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* TAB: Listings */}
+          {activeTab === 'listings' && (
+            <div className="space-y-4">
+              <div className="p-4 rounded-2xl bg-white border border-slate-200 flex flex-col sm:flex-row items-center justify-between gap-3 shadow-2xs">
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900">Listings Moderation</h3>
+                  <p className="text-xs text-slate-500">Inspect equipment, check host status and moderate visibility</p>
+                </div>
+                <div className="relative w-full sm:w-72">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
+                  <input
+                    type="text"
+                    value={listingSearch}
+                    onChange={(e) => setListingSearch(e.target.value)}
+                    placeholder="Search listing title, host..."
+                    className="w-full pl-8 pr-3 py-1.5 text-xs bg-slate-50 rounded-xl border border-slate-200 outline-none"
+                  />
+                </div>
+              </div>
+
+              <div className="overflow-hidden rounded-2xl bg-white border border-slate-200 shadow-2xs">
+                {isListingsLoading ? (
+                  <div className="p-12 text-center text-xs text-slate-400">Loading listings…</div>
+                ) : adminListings.length === 0 ? (
+                  <div className="p-12 text-center text-xs text-slate-400">No listings found.</div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-slate-50 text-slate-500 font-semibold border-b border-slate-100">
+                        <tr>
+                          <th className="px-6 py-3">Listing</th>
+                          <th className="px-4 py-3">Host</th>
+                          <th className="px-4 py-3">Category</th>
+                          <th className="px-4 py-3">Price / Rate</th>
+                          <th className="px-4 py-3">Bookings</th>
+                          <th className="px-4 py-3">Status</th>
+                          <th className="px-6 py-3 text-right">Moderation</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {adminListings.map((row) => (
+                          <tr key={row.listing.id} className="hover:bg-slate-50/80 transition-colors">
+                            <td className="px-6 py-3.5">
+                              <div className="flex items-center gap-3">
+                                {row.listing.images?.[0] ? (
+                                  <img
+                                    src={row.listing.images[0]}
+                                    alt=""
+                                    referrerPolicy="no-referrer"
+                                    className="w-10 h-10 rounded-lg object-cover border border-slate-200 shrink-0"
+                                  />
+                                ) : (
+                                  <div className="w-10 h-10 rounded-lg bg-slate-100 border border-slate-200 flex items-center justify-center text-slate-400 shrink-0 font-bold text-[10px]">
+                                    Item
+                                  </div>
+                                )}
+                                <div>
+                                  <div className="font-bold text-slate-900 line-clamp-1">{row.listing.title}</div>
+                                  <div className="text-[11px] text-slate-500">{row.listing.neighborhood || row.listing.city}</div>
+                                </div>
+                              </div>
+                            </td>
+                            <td className="px-4 py-3.5">
+                              <div className="font-medium text-slate-900">{row.listing.owner.name}</div>
+                              <div className="text-[11px] text-slate-500">{row.ownerEmail}</div>
+                              {row.ownerSuspended && (
+                                <span className="text-[10px] text-rose-600 font-bold">Host suspended</span>
+                              )}
+                            </td>
+                            <td className="px-4 py-3.5 text-slate-600 capitalize">
+                              {row.listing.category.replace('_', ' ')}
+                            </td>
+                            <td className="px-4 py-3.5 font-bold text-slate-900">
+                              {formatCurrency(row.listing.pricingTiers?.[0]?.priceInCents ?? 0)}
+                            </td>
+                            <td className="px-4 py-3.5 text-slate-700 font-semibold">
+                              {row.stats.totalBookings}
+                            </td>
+                            <td className="px-4 py-3.5">
+                              <span
+                                className={cn(
+                                  'px-2 py-0.5 rounded-full text-[10px] font-bold border',
+                                  row.listing.isAvailable
+                                    ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                    : 'bg-slate-100 text-slate-600 border-slate-200'
+                                )}
+                              >
+                                {row.listing.isAvailable ? 'Live' : 'Hidden'}
+                              </span>
+                            </td>
+                            <td className="px-6 py-3.5 text-right space-x-2 whitespace-nowrap">
+                              <button
+                                type="button"
+                                onClick={() => onViewListing?.(row.listing)}
+                                className="px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] font-bold cursor-pointer transition-colors"
+                              >
+                                View
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleToggleListingVisibility(row.listing.id, row.listing.isAvailable)}
+                                className={cn(
+                                  'px-2.5 py-1 rounded-lg text-[11px] font-bold cursor-pointer transition-colors',
+                                  row.listing.isAvailable
+                                    ? 'bg-amber-50 hover:bg-amber-100 text-amber-800'
+                                    : 'bg-emerald-50 hover:bg-emerald-100 text-emerald-800'
+                                )}
+                              >
+                                {row.listing.isAvailable ? 'Hide' : 'Show'}
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* TAB: Audit / Event Log */}
           {activeTab === 'audit' && report && (
             <div className="space-y-4">
               {/* Filter & Search Bar */}
@@ -783,6 +1154,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUser, onC
           )}
         </div>
       </div>
+  );
+
+  if (isPage) {
+    return <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 w-full">{dashboardContent}</div>;
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-2 sm:p-4 md:p-6 animate-in fade-in duration-200">
+      {dashboardContent}
     </div>
   );
 };
