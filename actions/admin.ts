@@ -1,484 +1,256 @@
-
-import { db, memoryStore } from '../db';
-import * as schema from '../db/schema';
-import { eq, sql, desc, count, sum } from 'drizzle-orm';
-import {
+import { memoryStore } from '../db';
+import type { Booking, Listing } from '../db/schema';
+import type {
   AdminAnalyticsReport,
-  ExecutiveKPIs,
   CategoryPerformanceData,
+  ListingCategory,
+  NeighbourhoodActivityData,
   RentalVelocityItem,
-  GeospatialDensityData,
-  FractionalApplianceTelemetry,
+  SharedApplianceStatus,
   SystemLogModel,
-  UserModel,
 } from '../src/types';
-import { INITIAL_LISTINGS } from '../src/data/mockListings';
+import { getUserById } from './auth';
+import { getListingRating } from './listings';
 
 /**
  * ============================================================================
- * EXECUTIVE ADMIN INTELLIGENCE & AGGREGATION SERVER ACTIONS
- * Executes real-time SQL analytical aggregations and PostGIS spatial clustering.
+ * ADMIN DASHBOARD REPORT
+ *
+ * Aggregates the store into the operator view. Every number is computed from
+ * recorded bookings, co-op memberships, usage and payments — nothing is
+ * seeded, padded or estimated.
+ *
+ * Because ShareHub runs entirely in the browser, this report covers the data
+ * held in the current browser only. A marketplace-wide view needs a server.
  * ============================================================================
  */
 
-export async function getExecutiveAdminReport(
-  dateRange: '7d' | '30d' | '90d' | 'all' = '30d'
-): Promise<{ success: boolean; data?: AdminAnalyticsReport; error?: string }> {
-  try {
-    // 1. Compute Executive Core KPIs
-    // Total GMV = Sum of completed & active bookings (totalAmountInCents) + Sum of active subscription monthly fees
-    let totalBookingRevenueCents = 0;
-    let completedHandovers = 0;
-    let totalBookings = 0;
+export type ReportRange = '7d' | '30d' | '90d' | 'all';
 
-    for (const b of memoryStore.bookings.values()) {
-      totalBookings++;
-      totalBookingRevenueCents += b.totalAmountInCents || 0;
-      if (b.status === 'COMPLETED' || b.handoverCompletedAt) {
-        completedHandovers++;
-      }
-    }
+const DAY_MS = 24 * 60 * 60 * 1000;
+const RANGE_DAYS: Record<ReportRange, number | null> = { '7d': 7, '30d': 30, '90d': 90, all: null };
 
-    // Add baseline seeded mock GMV for realistic platform analytics
-    const baseSubscriptionRevenueCents = 4850000; // R48,500.00
-    const totalGMVZAR = (totalBookingRevenueCents + baseSubscriptionRevenueCents) / 100;
+const CATEGORY_NAMES: Record<ListingCategory, string> = {
+  fractional_appliance: 'Shared appliances',
+  physical_item: 'Tools & equipment',
+  room: 'Spaces & rooms',
+};
 
-    // Fractional utilization rate calculation
-    let totalAllocatedUses = 0;
-    let totalConsumedUses = 0;
-    for (const sub of memoryStore.userSubscriptions.values()) {
-      const tierUses = sub.remainingUsesThisPeriod + sub.totalUsesUsed;
-      totalAllocatedUses += Math.max(tierUses, 10);
-      totalConsumedUses += sub.totalUsesUsed;
-    }
-    // Normalized realistic fleet utilization
-    const fractionalUtilizationRate = Math.min(
-      94.2,
-      Math.max(68.5, totalAllocatedUses > 0 ? (totalConsumedUses / totalAllocatedUses) * 100 : 78.4)
-    );
+const round1 = (n: number) => Math.round(n * 10) / 10;
+const toRand = (cents: number) => Math.round(cents) / 100;
 
-    // User & Verified Host Ratio
-    const totalUsersCount = Math.max(148, memoryStore.users.size + 147);
-    const verifiedHostsCount = 64;
-    const verifiedHostRatio = Math.round((verifiedHostsCount / totalUsersCount) * 100);
-
-    const activeDisputesCount = 1;
-    const disputeRate = parseFloat(((activeDisputesCount / Math.max(1, totalBookings + 85)) * 100).toFixed(2));
-
-    const kpis: ExecutiveKPIs = {
-      totalGMVZAR: Math.round(totalGMVZAR),
-      gmvGrowthPct: 18.4,
-      activeSubscriptionsCount: Math.max(34, memoryStore.userSubscriptions.size + 33),
-      fractionalUtilizationRate: parseFloat(fractionalUtilizationRate.toFixed(1)),
-      totalUsersCount,
-      verifiedHostRatio,
-      completedHandoversCount: Math.max(82, completedHandovers + 81),
-      activeDisputesCount,
-      disputeRate,
-      averageTrustScore: 98.4,
-    };
-
-    // 2. Category Performance Aggregations (Revenue, Volume, Avg Ticket)
-    const categoryPerformance: CategoryPerformanceData[] = [
-      {
-        categoryId: 'cat_appliances',
-        categoryName: 'Fractional Appliances & Solar Co-Ops',
-        revenueZAR: 34200,
-        bookingCount: 142,
-        activeListingsCount: 18,
-        subscriberCount: 68,
-        avgTicketZAR: 450,
-      },
-      {
-        categoryId: 'cat_power_tools',
-        categoryName: 'Power Tools & Heavy Equipment',
-        revenueZAR: 22800,
-        bookingCount: 89,
-        activeListingsCount: 24,
-        subscriberCount: 14,
-        avgTicketZAR: 256,
-      },
-      {
-        categoryId: 'cat_vehicles',
-        categoryName: 'Vehicles, Diagnostics & Racks',
-        revenueZAR: 18900,
-        bookingCount: 52,
-        activeListingsCount: 15,
-        subscriberCount: 6,
-        avgTicketZAR: 363,
-      },
-      {
-        categoryId: 'cat_rooms',
-        categoryName: 'Creative Studios, Rooms & Garages',
-        revenueZAR: 41500,
-        bookingCount: 38,
-        activeListingsCount: 12,
-        subscriberCount: 22,
-        avgTicketZAR: 1092,
-      },
-      {
-        categoryId: 'cat_outdoor',
-        categoryName: 'Outdoor, Camping & Cargo Gear',
-        revenueZAR: 9400,
-        bookingCount: 44,
-        activeListingsCount: 16,
-        subscriberCount: 4,
-        avgTicketZAR: 213,
-      },
-    ];
-
-    // 3. Rental Velocity & Highest-Yield Items
-    const rentalVelocity: RentalVelocityItem[] = [
-      {
-        id: 'list_wm_001',
-        title: 'Bosch Serie 8 (9kg) High-Efficiency Washer Co-Op',
-        category: 'fractional_appliance',
-        categoryName: 'Fractional Appliances',
-        neighborhood: 'Observatory, Cape Town',
-        ownerName: 'Alex Rivera',
-        totalBookings: 84,
-        utilizationRatePct: 92.5,
-        totalRevenueZAR: 16200,
-        avgTurnaroundHours: 1.2,
-        rating: 4.96,
-        status: 'high_velocity',
-      },
-      {
-        id: 'list_drill_002',
-        title: 'DeWalt 20V MAX Cordless Rotary Hammer Drill Kit',
-        category: 'physical_item',
-        categoryName: 'Power Tools',
-        neighborhood: 'Woodstock / Salt River',
-        ownerName: 'Marcus Van Der Merwe',
-        totalBookings: 42,
-        utilizationRatePct: 88.0,
-        totalRevenueZAR: 6300,
-        avgTurnaroundHours: 3.5,
-        rating: 4.92,
-        status: 'high_velocity',
-      },
-      {
-        id: 'list_studio_003',
-        title: 'Sunlit Natural Light Podcast & Photography Studio',
-        category: 'room',
-        categoryName: 'Studios & Rooms',
-        neighborhood: 'Gardens / City Bowl',
-        ownerName: 'Claire Du Preez',
-        totalBookings: 31,
-        utilizationRatePct: 84.2,
-        totalRevenueZAR: 14880,
-        avgTurnaroundHours: 2.0,
-        rating: 4.98,
-        status: 'high_velocity',
-      },
-      {
-        id: 'list_miter_004',
-        title: 'Festool Kapex Sliding Compound Miter Saw Co-Op',
-        category: 'physical_item',
-        categoryName: 'Power Tools',
-        neighborhood: 'Salt River / Woodstock',
-        ownerName: 'Thabo Mokoena',
-        totalBookings: 28,
-        utilizationRatePct: 76.5,
-        totalRevenueZAR: 8960,
-        avgTurnaroundHours: 4.1,
-        rating: 4.95,
-        status: 'steady',
-      },
-      {
-        id: 'list_camper_005',
-        title: 'Thule Motion XT XL Rooftop Cargo Box (500L)',
-        category: 'physical_item',
-        categoryName: 'Vehicles & Travel',
-        neighborhood: 'Green Point',
-        ownerName: 'Dylan Jacobs',
-        totalBookings: 22,
-        utilizationRatePct: 69.0,
-        totalRevenueZAR: 4180,
-        avgTurnaroundHours: 8.0,
-        rating: 4.88,
-        status: 'steady',
-      },
-    ];
-
-    // 4. Geospatial Demand & Density Heatmap (Supply vs Search Deficit Hotspots)
-    const geospatialDemand: GeospatialDensityData[] = [
-      {
-        zone: 'City Bowl',
-        neighborhood: 'Gardens, Tamboerskloof & CBD',
-        activeListings: 26,
-        totalBookings: 114,
-        searchDemandCount: 420,
-        supplyDemandRatio: 0.27,
-        status: 'deficit', // High demand, low local supply -> recruit hosts
-        topMissingCategory: 'Fractional Appliances & High-End Power Tools',
-      },
-      {
-        zone: 'Southern Suburbs',
-        neighborhood: 'Observatory, Rondebosch & Claremont',
-        activeListings: 38,
-        totalBookings: 142,
-        searchDemandCount: 310,
-        supplyDemandRatio: 0.45,
-        status: 'balanced',
-        topMissingCategory: 'Car Diagnostic Scanners & Rooftop Cargo',
-      },
-      {
-        zone: 'Atlantic Seaboard',
-        neighborhood: 'Sea Point, Camps Bay & Green Point',
-        activeListings: 19,
-        totalBookings: 88,
-        searchDemandCount: 290,
-        supplyDemandRatio: 0.30,
-        status: 'deficit',
-        topMissingCategory: 'Clean Energy & Compact Storage Units',
-      },
-      {
-        zone: 'Woodstock & Salt River',
-        neighborhood: 'Woodstock Makers District',
-        activeListings: 32,
-        totalBookings: 96,
-        searchDemandCount: 160,
-        supplyDemandRatio: 0.60,
-        status: 'surplus',
-        topMissingCategory: 'Darkroom / Podcast Audio Studios',
-      },
-      {
-        zone: 'Northern Suburbs',
-        neighborhood: 'Durbanville & Bellville',
-        activeListings: 14,
-        totalBookings: 46,
-        searchDemandCount: 240,
-        supplyDemandRatio: 0.19,
-        status: 'deficit',
-        topMissingCategory: 'High-Pressure Washers & Solar Battery Packs',
-      },
-    ];
-
-    // 5. Fractional Appliance Fleet Telemetry & Preventive Maintenance
-    const fractionalTelemetry: FractionalApplianceTelemetry[] = [
-      {
-        listingId: 'list_wm_001',
-        title: 'Bosch Serie 8 (9kg) Eco Washer Co-Op',
-        hostName: 'Alex Rivera',
-        neighborhood: 'Observatory',
-        activeSubscribers: 4,
-        maxCapacity: 4,
-        cyclesLoggedThisMonth: 38,
-        remainingQuotaThisMonth: 12,
-        wearTearPct: 62,
-        estimatedLifespanRemainingCycles: 840,
-        maintenanceStatus: 'healthy',
-        lastCycleAt: 'Today, 14:22',
-      },
-      {
-        listingId: 'list_wm_miele_02',
-        title: 'Miele TwinDos Commercial Co-Op Unit #4',
-        hostName: 'Claire Du Preez',
-        neighborhood: 'Gardens',
-        activeSubscribers: 5,
-        maxCapacity: 5,
-        cyclesLoggedThisMonth: 86,
-        remainingQuotaThisMonth: 4,
-        wearTearPct: 88,
-        estimatedLifespanRemainingCycles: 114,
-        maintenanceStatus: 'maintenance_due', // Host alert triggered
-        lastCycleAt: 'Today, 11:05',
-      },
-      {
-        listingId: 'list_3d_prusa_03',
-        title: 'Prusa MK4 CoreXY 3D Printer Co-Op',
-        hostName: 'Thabo Mokoena',
-        neighborhood: 'Woodstock',
-        activeSubscribers: 3,
-        maxCapacity: 4,
-        cyclesLoggedThisMonth: 44,
-        remainingQuotaThisMonth: 26,
-        wearTearPct: 45,
-        estimatedLifespanRemainingCycles: 480,
-        maintenanceStatus: 'healthy',
-        lastCycleAt: 'Yesterday, 19:30',
-      },
-      {
-        listingId: 'list_solar_ecoflow_04',
-        title: 'EcoFlow Delta Pro 3.6kWh Mobile Battery Co-Op',
-        hostName: 'Marcus Van Der Merwe',
-        neighborhood: 'Green Point',
-        activeSubscribers: 4,
-        maxCapacity: 4,
-        cyclesLoggedThisMonth: 58,
-        remainingQuotaThisMonth: 8,
-        wearTearPct: 78,
-        estimatedLifespanRemainingCycles: 220,
-        maintenanceStatus: 'inspection_required',
-        lastCycleAt: '2 days ago',
-      },
-    ];
-
-    // 6. Real-Time Operations Audit Stream from SystemLogs
-    const logsFromMemory = Array.from(memoryStore.systemLogs.values());
-
-    // Sort newest first
-    const sortedLogs = logsFromMemory.sort(
-      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-    );
-
-    const systemLogsFormatted: SystemLogModel[] = sortedLogs.map((l) => ({
-      id: l.id,
-      eventType: l.eventType,
-      userId: l.userId,
-      targetId: l.targetId,
-      metadata: l.metadata || {},
-      createdAt: l.createdAt instanceof Date ? l.createdAt.toISOString() : String(l.createdAt),
-    }));
-
-    return {
-      success: true,
-      data: {
-        kpis,
-        categoryPerformance,
-        rentalVelocity,
-        geospatialDemand,
-        fractionalTelemetry,
-        recentSystemLogs: systemLogsFormatted,
-        generatedAt: new Date().toISOString(),
-      },
-    };
-  } catch (error: any) {
-    console.error('Error in getExecutiveAdminReport:', error);
-    return { success: false, error: error.message || 'Failed to generate admin intelligence report.' };
+/** Month starts (billing dates) of a subscription that fall inside a window. */
+function billingDatesInWindow(createdAt: Date, from: Date, to: Date): number {
+  let count = 0;
+  const cursor = new Date(createdAt.getFullYear(), createdAt.getMonth(), createdAt.getDate());
+  while (cursor <= to) {
+    if (cursor >= from) count++;
+    cursor.setMonth(cursor.getMonth() + 1);
   }
+  return count;
 }
 
-/**
- * ============================================================================
- * BOOTSTRAP ADMIN ACTION
- * Forcefully queries the Users table by email and elevates their role to 'ADMIN'.
- * Permanently links the founder's account to the Executive Admin Command Center.
- * ============================================================================
- */
-export async function bootstrapAdmin(
-  email: string
-): Promise<{ success: boolean; user?: UserModel; message?: string; error?: string }> {
-  try {
-    if (!email || !email.includes('@')) {
-      return { success: false, error: 'A valid email address is required to bootstrap admin access.' };
-    }
-
-    const cleanEmail = email.toLowerCase().trim();
-    const now = new Date();
-    let targetUser: schema.User | null = null;
-    let targetUserId: string | null = null;
-
-    // 1. Check in-memory store
-    for (const [id, user] of memoryStore.users.entries()) {
-      if (user.email.toLowerCase().trim() === cleanEmail) {
-        targetUser = user;
-        targetUserId = id;
-        break;
-      }
-    }
-
-    // 2. Query Neon Database via Drizzle if available
-    try {
-      const dbUsers = await (db as any).select().from(schema.users).where(eq(schema.users.email, cleanEmail)).limit(1);
-      if (dbUsers && dbUsers.length > 0) {
-        targetUser = dbUsers[0];
-        targetUserId = dbUsers[0].id;
-      }
-    } catch (dbErr) {
-      console.warn('Neon DB query fallback to memoryStore:', dbErr);
-    }
-
-    // 3. If user doesn't exist yet, create their foundational ADMIN profile
-    if (!targetUser) {
-      targetUserId = `usr_founder_${Date.now()}`;
-      const nameParts = cleanEmail.split('@')[0].replace(/[._-]/g, ' ');
-      const formattedName = nameParts.replace(/\b\w/g, (c) => c.toUpperCase());
-
-      targetUser = {
-        id: targetUserId,
-        name: formattedName || 'Platform Founder & Admin',
-        email: cleanEmail,
-        emailVerified: true,
-        role: 'ADMIN',
-        image: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80',
-        phoneNumber: '+27 82 555 0100',
-        bio: 'ShareHub Platform Founder & Principal Executive Administrator.',
-        neighborhood: 'City Bowl / Gardens',
-        trustScore: 100,
-        isHost: true,
-        createdAt: now,
-        updatedAt: now,
-      };
-
-      memoryStore.users.set(targetUserId, targetUser);
-
-      try {
-        await (db as any).insert(schema.users).values(targetUser).onConflictDoUpdate({
-          target: schema.users.email,
-          set: { role: 'ADMIN', isHost: true, trustScore: 100, updatedAt: now },
-        });
-      } catch (insertErr) {
-        console.warn('Neon DB insert fallback to memory:', insertErr);
-      }
-    } else {
-      // 4. Forcefully elevate existing user's role to 'ADMIN'
-      targetUser.role = 'ADMIN';
-      targetUser.isHost = true;
-      targetUser.trustScore = 100;
-      targetUser.updatedAt = now;
-
-      memoryStore.users.set(targetUserId!, targetUser);
-
-      try {
-        await (db as any)
-          .update(schema.users)
-          .set({
-            role: 'ADMIN',
-            isHost: true,
-            trustScore: 100,
-            updatedAt: now,
-          })
-          .where(eq(schema.users.email, cleanEmail));
-      } catch (updateErr) {
-        console.warn('Neon DB update fallback to memory:', updateErr);
-      }
-    }
-
-    // 5. Append immutable SystemLog audit entry
-    const logId = `sys_admin_bootstrap_${Date.now()}`;
-    const auditLog: schema.SystemLog = {
-      id: logId,
-      eventType: 'AUTH_SIGNIN',
-      userId: targetUserId!,
-      targetId: targetUserId!,
-      metadata: {
-        action: 'BOOTSTRAP_ADMIN_ELEVATION',
-        elevatedEmail: cleanEmail,
-        newRole: 'ADMIN',
-        timestamp: now.toISOString(),
-      },
-      createdAt: now,
-    };
-    memoryStore.systemLogs.set(logId, auditLog);
-
-    const userModel: UserModel = {
-      ...targetUser,
-      createdAt: targetUser.createdAt instanceof Date ? targetUser.createdAt.toISOString() : String(targetUser.createdAt),
-      updatedAt: targetUser.updatedAt instanceof Date ? targetUser.updatedAt.toISOString() : String(targetUser.updatedAt),
-    };
-
-    return {
-      success: true,
-      user: userModel,
-      message: `Account "${cleanEmail}" has been elevated to ADMIN role.`,
-    };
-  } catch (error: any) {
-    console.error('Error in bootstrapAdmin:', error);
-    return {
-      success: false,
-      error: error.message || 'Failed to bootstrap admin access.',
-    };
+export async function getExecutiveAdminReport(
+  requesterId: string | null,
+  dateRange: ReportRange = '30d'
+): Promise<{ success: boolean; data?: AdminAnalyticsReport; error?: string }> {
+  const requester = requesterId ? getUserById(requesterId) : null;
+  if (!requester || requester.role !== 'ADMIN') {
+    return { success: false, error: 'You do not have access to this page.' };
   }
+
+  const now = new Date();
+  const days = RANGE_DAYS[dateRange];
+  const earliest = new Date(0);
+  const from = days === null ? earliest : new Date(now.getTime() - days * DAY_MS);
+  const prevFrom = days === null ? null : new Date(from.getTime() - days * DAY_MS);
+  const inWindow = (d: Date, start: Date, end: Date) => d >= start && d <= end;
+
+  const listings = Array.from(memoryStore.listings.values());
+  const listingById = new Map(listings.map((l) => [l.id, l]));
+  const bookings = Array.from(memoryStore.bookings.values()).filter((b) => b.status !== 'CANCELLED');
+  const subs = Array.from(memoryStore.userSubscriptions.values());
+  const activeSubs = subs.filter((s) => s.status === 'active');
+  const usage = Array.from(memoryStore.usageLogs.values());
+  const users = Array.from(memoryStore.users.values());
+
+  const bookingRevenue = (b: Booking) => b.totalAmountInCents;
+  const tierPrice = (tierId: string) => memoryStore.pricingTiers.get(tierId)?.priceInCents ?? 0;
+
+  /** Gross value (rental fees + co-op fees) booked in a window, optionally for one listing. */
+  const grossInWindow = (start: Date, end: Date, filter: (l: Listing) => boolean = () => true) => {
+    let cents = 0;
+    let transactions = 0;
+    for (const b of bookings) {
+      const listing = listingById.get(b.listingId);
+      if (!listing || !filter(listing) || !inWindow(b.createdAt, start, end)) continue;
+      cents += bookingRevenue(b);
+      transactions++;
+    }
+    for (const s of subs) {
+      const listing = listingById.get(s.listingId);
+      if (!listing || !filter(listing)) continue;
+      const charges = billingDatesInWindow(s.createdAt, start, s.cancelledAt ?? end);
+      cents += charges * tierPrice(s.pricingTierId);
+      transactions += charges;
+    }
+    return { cents, transactions };
+  };
+
+  // --- KPIs ---
+  const current = grossInWindow(from, now);
+  const previous = prevFrom ? grossInWindow(prevFrom, from) : null;
+  const gmvGrowthPct =
+    previous && previous.cents > 0 ? round1(((current.cents - previous.cents) / previous.cents) * 100) : null;
+
+  let allowance = 0;
+  let used = 0;
+  for (const s of activeSubs) {
+    const limit = memoryStore.pricingTiers.get(s.pricingTierId)?.usageLimitPerPeriod ?? 0;
+    allowance += limit;
+    used += Math.min(limit, s.totalUsesUsed);
+  }
+
+  const bookingsInRange = bookings.filter((b) => inWindow(b.createdAt, from, now));
+  const disputes = bookings.filter((b) => b.disputeStatus === 'PENDING_REVIEW');
+  const verifiedHosts = users.filter((u) => u.role === 'VERIFIED_HOST').length;
+
+  const kpis = {
+    totalGMVZAR: toRand(current.cents),
+    gmvGrowthPct,
+    activeSubscriptionsCount: activeSubs.length,
+    fractionalUtilizationRate: allowance > 0 ? round1((used / allowance) * 100) : 0,
+    totalUsersCount: users.length,
+    verifiedHostRatio: users.length > 0 ? Math.round((verifiedHosts / users.length) * 100) : 0,
+    completedHandoversCount: bookings.filter((b) => b.handoverCompletedAt && inWindow(b.handoverCompletedAt, from, now)).length,
+    activeDisputesCount: disputes.length,
+    disputeRate: bookingsInRange.length > 0 ? round1((disputes.length / bookingsInRange.length) * 100) : 0,
+    averageTrustScore: users.length > 0 ? round1(users.reduce((sum, u) => sum + u.trustScore, 0) / users.length) : 0,
+  };
+
+  // --- Categories ---
+  const categoryPerformance: CategoryPerformanceData[] = (Object.keys(CATEGORY_NAMES) as ListingCategory[]).map((category) => {
+    const matches = (l: Listing) => l.category === category;
+    const gross = grossInWindow(from, now, matches);
+    return {
+      categoryId: category,
+      categoryName: CATEGORY_NAMES[category],
+      revenueZAR: toRand(gross.cents),
+      bookingCount: bookingsInRange.filter((b) => matches(listingById.get(b.listingId)!)).length,
+      activeListingsCount: listings.filter((l) => matches(l) && l.isAvailable).length,
+      subscriberCount: activeSubs.filter((s) => {
+        const l = listingById.get(s.listingId);
+        return l ? matches(l) : false;
+      }).length,
+      avgTicketZAR: gross.transactions > 0 ? Math.round(toRand(gross.cents / gross.transactions)) : 0,
+    };
+  });
+
+  // --- Listing performance ---
+  const windowStart = days === null ? null : from;
+  const rentalVelocity: RentalVelocityItem[] = listings
+    .map((l) => {
+      const listingBookings = bookingsInRange.filter((b) => b.listingId === l.id);
+      const cycles = usage.filter((u) => u.listingId === l.id && inWindow(u.startedAt, from, now)).length;
+      const gross = grossInWindow(from, now, (x) => x.id === l.id);
+
+      let utilization: number;
+      let avgRentalHours: number | null = null;
+      if (l.category === 'fractional_appliance') {
+        utilization = l.maxSubscribers > 0 ? (l.currentSubscribersCount / l.maxSubscribers) * 100 : 0;
+      } else {
+        const spanStart = windowStart ?? l.createdAt;
+        const spanMs = Math.max(DAY_MS, now.getTime() - spanStart.getTime());
+        const bookedMs = listingBookings.reduce((sum, b) => sum + (b.endDate.getTime() - b.startDate.getTime()), 0);
+        utilization = Math.min(100, (bookedMs / spanMs) * 100);
+        if (listingBookings.length > 0) avgRentalHours = round1(bookedMs / listingBookings.length / (60 * 60 * 1000));
+      }
+
+      const owner = memoryStore.users.get(l.ownerId);
+      return {
+        id: l.id,
+        title: l.title,
+        category: l.category as ListingCategory,
+        categoryName: CATEGORY_NAMES[l.category as ListingCategory],
+        neighborhood: l.neighborhood,
+        ownerName: owner?.name ?? 'Unknown host',
+        totalBookings: listingBookings.length + cycles,
+        utilizationRatePct: round1(utilization),
+        totalRevenueZAR: toRand(gross.cents),
+        avgRentalHours,
+        rating: getListingRating(l.id).rating ?? null,
+        status: (utilization >= 70 ? 'high_velocity' : utilization >= 30 ? 'steady' : 'underutilized') as RentalVelocityItem['status'],
+      };
+    })
+    .sort((a, b) => b.totalRevenueZAR - a.totalRevenueZAR || b.totalBookings - a.totalBookings)
+    .slice(0, 10);
+
+  // --- Neighbourhoods ---
+  const hoods = new Map<string, NeighbourhoodActivityData>();
+  for (const l of listings) {
+    const entry = hoods.get(l.neighborhood) ?? {
+      neighborhood: l.neighborhood,
+      activeListings: 0,
+      totalBookings: 0,
+      activeSubscribers: 0,
+      revenueZAR: 0,
+    };
+    if (l.isAvailable) entry.activeListings++;
+    entry.totalBookings += bookingsInRange.filter((b) => b.listingId === l.id).length;
+    entry.activeSubscribers += activeSubs.filter((s) => s.listingId === l.id).length;
+    entry.revenueZAR += toRand(grossInWindow(from, now, (x) => x.id === l.id).cents);
+    hoods.set(l.neighborhood, entry);
+  }
+  const neighbourhoodActivity = Array.from(hoods.values()).sort(
+    (a, b) => b.revenueZAR - a.revenueZAR || b.activeListings - a.activeListings
+  );
+
+  // --- Shared appliances ---
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const sharedAppliances: SharedApplianceStatus[] = listings
+    .filter((l) => l.category === 'fractional_appliance')
+    .map((l) => {
+      const listingUsage = usage.filter((u) => u.listingId === l.id);
+      const last = listingUsage.reduce<Date | null>((max, u) => (!max || u.startedAt > max ? u.startedAt : max), null);
+      return {
+        listingId: l.id,
+        title: l.title,
+        hostName: memoryStore.users.get(l.ownerId)?.name ?? 'Unknown host',
+        neighborhood: l.neighborhood,
+        activeSubscribers: l.currentSubscribersCount,
+        maxCapacity: l.maxSubscribers,
+        cyclesLoggedThisMonth: listingUsage.filter((u) => u.startedAt >= monthStart).length,
+        remainingQuotaThisMonth: activeSubs
+          .filter((s) => s.listingId === l.id)
+          .reduce((sum, s) => sum + s.remainingUsesThisPeriod, 0),
+        lastCycleAt: last ? last.toISOString() : null,
+      };
+    });
+
+  // --- Event log ---
+  const recentSystemLogs: SystemLogModel[] = Array.from(memoryStore.systemLogs.values())
+    .filter((l) => inWindow(l.createdAt, from, now))
+    .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+    .slice(0, 200)
+    .map((l) => ({
+      id: l.id,
+      eventType: l.eventType as SystemLogModel['eventType'],
+      userId: l.userId,
+      targetId: l.targetId,
+      metadata: (l.metadata as Record<string, any>) || {},
+      createdAt: l.createdAt.toISOString(),
+    }));
+
+  return {
+    success: true,
+    data: {
+      kpis,
+      categoryPerformance,
+      rentalVelocity,
+      neighbourhoodActivity,
+      sharedAppliances,
+      recentSystemLogs,
+      generatedAt: now.toISOString(),
+    },
+  };
 }

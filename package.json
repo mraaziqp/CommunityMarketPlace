@@ -8,18 +8,27 @@
     "node": ">=20.19.0"
   },
   "scripts": {
-    "dev": "vite --port=3000 --host=0.0.0.0",
-    "build": "tsc --noEmit && vite build",
-    "preview": "vite preview --port=4173",
-    "clean": "rm -rf dist",
+    "dev": "node scripts/dev.mjs",
+    "dev:web": "vite --port=3000 --host=0.0.0.0",
+    "dev:server": "tsx watch server/index.ts",
+    "build": "tsc --noEmit && vite build && npm run build:server",
+    "build:server": "esbuild server/index.ts --bundle --platform=node --format=esm --target=node22 --packages=external --outfile=dist-server/index.mjs",
+    "start": "node dist-server/index.mjs",
+    "test": "tsx --test server/test/integration.test.ts",
+    "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit",
-    "typecheck": "tsc --noEmit"
+    "db:generate": "drizzle-kit generate",
+    "clean": "rm -rf dist dist-server"
   },
   "dependencies": {
+    "@hono/node-server": "^2.1.1",
     "clsx": "^2.1.1",
     "drizzle-orm": "^0.45.2",
+    "firebase-admin": "^13.10.0",
+    "hono": "^4.13.10",
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
+    "postgres": "^3.4.9",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
     "recharts": "^3.10.1",
@@ -27,12 +36,16 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8",
     "@tailwindcss/vite": "^4.1.14",
     "@types/node": "^22.14.0",
     "@types/react": "^19.0.1",
     "@types/react-dom": "^19.0.1",
     "@vitejs/plugin-react": "^5.0.4",
+    "drizzle-kit": "^0.31.11",
+    "esbuild": "^0.28.2",
     "tailwindcss": "^4.1.14",
+    "tsx": "^4.23.15",
     "typescript": "~5.8.2",
     "vite": "^6.2.3"
   }

@@ -29,38 +29,33 @@ import {
   ExternalLink,
   Shield,
 } from 'lucide-react';
-import {
-  AdminAnalyticsReport,
-  ExecutiveKPIs,
-  CategoryPerformanceData,
-  RentalVelocityItem,
-  GeospatialDensityData,
-  FractionalApplianceTelemetry,
-  SystemLogModel,
-  UserModel,
-} from '../../types';
-import { getExecutiveAdminReport, bootstrapAdmin } from '../../../actions/admin';
+import { AdminAnalyticsReport, SystemLogModel, UserModel } from '../../types';
+import { api } from '../../api/client';
+import { PaymentsPanel } from './PaymentsPanel';
+import { formatCurrency } from '../../lib/utils';
 import { cn } from '../../lib/utils';
 
 const CategoryRevenueChart = lazy(() => import('./CategoryRevenueChart'));
 
 export interface AdminDashboardProps {
-  currentUser: UserModel | null;
+  currentUser: UserModel;
   onClose: () => void;
-  onElevateToAdmin?: () => void;
 }
 
-export const AdminDashboard: React.FC<AdminDashboardProps> = ({
-  currentUser,
-  onClose,
-  onElevateToAdmin,
-}) => {
+const rand = (zar: number) => formatCurrency(Math.round(zar * 100));
+
+/**
+ * Operator dashboard. App only mounts this for admins, and the report action
+ * re-checks the requester's role before returning any data.
+ */
+export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUser, onClose }) => {
   const [dateRange, setDateRange] = useState<'7d' | '30d' | '90d' | 'all'>('30d');
-  const [activeTab, setActiveTab] = useState<'analytics' | 'velocity' | 'geospatial' | 'fleet' | 'audit'>(
+  const [activeTab, setActiveTab] = useState<'analytics' | 'velocity' | 'neighbourhoods' | 'appliances' | 'payments' | 'audit'>(
     'analytics'
   );
   const [report, setReport] = useState<AdminAnalyticsReport | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
 
   // Audit Log State
@@ -69,47 +64,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [selectedLogForJson, setSelectedLogForJson] = useState<SystemLogModel | null>(null);
   const [copiedJson, setCopiedJson] = useState(false);
 
-  // Founder Bootstrap Form State
-  const [bootstrapEmailInput, setBootstrapEmailInput] = useState<string>(
-    currentUser?.email || 'admin@sharehub.community'
-  );
-  const [isBootstrapping, setIsBootstrapping] = useState(false);
-  const [bootstrapMessage, setBootstrapMessage] = useState<string | null>(null);
+  const isAdmin = currentUser.role === 'ADMIN';
 
-  // Fetch report from Server Action
   const fetchReport = () => {
+    if (!isAdmin) return;
     setIsLoading(true);
     startTransition(async () => {
-      const res = await getExecutiveAdminReport(dateRange);
-      if (res.success && res.data) {
-        setReport(res.data);
-        if (!selectedLogForJson && res.data.recentSystemLogs.length > 0) {
-          setSelectedLogForJson(res.data.recentSystemLogs[0]);
+      try {
+        const data = await api.adminReport(dateRange);
+        setReport(data);
+        setLoadError(null);
+        if (!selectedLogForJson && data.recentSystemLogs.length > 0) {
+          setSelectedLogForJson(data.recentSystemLogs[0]);
         }
+      } catch (err: any) {
+        setLoadError(err?.message || 'The report could not be loaded.');
       }
       setIsLoading(false);
     });
-  };
-
-  const handleRunBootstrap = async (emailToBootstrap: string) => {
-    setIsBootstrapping(true);
-    setBootstrapMessage(null);
-    try {
-      const res = await bootstrapAdmin(emailToBootstrap);
-      if (res.success) {
-        setBootstrapMessage(res.message || `Account ${emailToBootstrap} elevated to ADMIN.`);
-        if (onElevateToAdmin) {
-          onElevateToAdmin();
-        }
-        fetchReport();
-      } else {
-        setBootstrapMessage(res.error || 'Failed to bootstrap account.');
-      }
-    } catch (err: any) {
-      setBootstrapMessage(err.message || 'Error executing bootstrapAdmin.');
-    } finally {
-      setIsBootstrapping(false);
-    }
   };
 
   useEffect(() => {
@@ -122,82 +94,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setTimeout(() => setCopiedJson(false), 2000);
   };
 
-  // If user is not admin, show security access notice with instant founder bootstrapping
-  if (!currentUser || currentUser.role !== 'ADMIN') {
-    return (
-      <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-950/80 backdrop-blur-xs flex items-center justify-center p-4">
-        <div className="w-full max-w-md bg-white rounded-3xl p-6 text-center space-y-4 border border-slate-200 shadow-2xl animate-in zoom-in-95">
-          <div className="w-12 h-12 rounded-2xl bg-purple-100 text-purple-700 flex items-center justify-center mx-auto">
-            <Shield className="w-6 h-6" />
-          </div>
-          <div>
-            <h3 className="text-base font-bold text-slate-900">Restricted Executive Command Center</h3>
-            <p className="text-xs text-slate-500 mt-1">
-              Access to <code>/admin</code> requires verified <code>ADMIN</code> privileges.
-            </p>
-          </div>
-
-          <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 text-left text-xs text-slate-600 space-y-1">
-            <span className="font-semibold text-slate-800 block">Current Session Role:</span>
-            <div className="flex items-center justify-between">
-              <span>{currentUser ? `${currentUser.name} (${currentUser.role})` : 'Not signed in'}</span>
-              <span className="px-2 py-0.5 rounded-md bg-amber-100 text-amber-800 text-[10px] font-bold">
-                UNAUTHORIZED
-              </span>
-            </div>
-          </div>
-
-          {/* Interactive Founder Bootstrap Tool */}
-          <div className="p-4 rounded-2xl bg-purple-50/80 border border-purple-200 text-left space-y-2.5">
-            <div className="flex items-center gap-1.5 font-bold text-xs text-purple-900">
-              <Sparkles className="w-4 h-4 text-purple-600" />
-              <span>Founder Account Elevation Action</span>
-            </div>
-            <p className="text-[11px] text-purple-700 leading-relaxed">
-              Enter your email to run the <code>bootstrapAdmin</code> Server Action and permanently unlock Executive Admin privileges.
-            </p>
-            <div className="flex gap-2">
-              <input
-                type="email"
-                value={bootstrapEmailInput}
-                onChange={(e) => setBootstrapEmailInput(e.target.value)}
-                placeholder="founder@example.com"
-                className="flex-1 px-3 py-1.5 text-xs bg-white rounded-xl border border-purple-300 text-slate-900 focus:outline-none focus:ring-2 focus:ring-purple-400 font-mono"
-              />
-              <button
-                type="button"
-                onClick={() => handleRunBootstrap(bootstrapEmailInput)}
-                disabled={isBootstrapping || !bootstrapEmailInput}
-                className="px-3 py-1.5 text-xs font-bold text-white bg-purple-700 hover:bg-purple-800 disabled:opacity-50 rounded-xl shadow-xs transition-colors shrink-0 flex items-center gap-1 cursor-pointer"
-              >
-                {isBootstrapping ? (
-                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                ) : (
-                  <Check className="w-3.5 h-3.5" />
-                )}
-                <span>Bootstrap</span>
-              </button>
-            </div>
-            {bootstrapMessage && (
-              <p className="text-[10px] font-mono text-purple-900 bg-purple-100/80 p-2 rounded-lg border border-purple-200">
-                {bootstrapMessage}
-              </p>
-            )}
-          </div>
-
-          <div className="flex gap-2 pt-1">
-            <button
-              type="button"
-              onClick={onClose}
-              className="flex-1 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl transition-colors cursor-pointer"
-            >
-              Back to Marketplace
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
+  // Defence in depth: never render any admin UI for anyone else.
+  if (!isAdmin) return null;
 
   // Filter system logs
   const filteredLogs = report?.recentSystemLogs.filter((log) => {
@@ -221,15 +119,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h1 className="text-base font-bold text-white tracking-tight">
-                  Executive Admin Intelligence
-                </h1>
-                <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-purple-950 text-purple-300 border border-purple-700">
-                  /admin • Live Neon Aggregations
-                </span>
+                <h1 className="text-base font-bold text-white tracking-tight">Admin dashboard</h1>
               </div>
               <p className="text-xs text-slate-400">
-                P2P Market Liquidity, PostGIS Geospatial Hotspots & Fleet Telemetry
+                Bookings, co-ops and payments recorded in this browser
               </p>
             </div>
           </div>
@@ -260,7 +153,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               onClick={fetchReport}
               disabled={isLoading || isPending}
               className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors cursor-pointer"
-              title="Refresh Analytics"
+              title="Refresh"
+              aria-label="Refresh"
             >
               <RefreshCw className={cn('w-4 h-4', (isLoading || isPending) && 'animate-spin')} />
             </button>
@@ -269,6 +163,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             <button
               type="button"
               onClick={onClose}
+              aria-label="Close"
               className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors cursor-pointer"
             >
               <X className="w-5 h-5" />
@@ -290,21 +185,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               )}
             >
               <TrendingUp className="w-3.5 h-3.5 text-amber-400" />
-              Category & Revenue Metrics
+              Overview
             </button>
 
             <button
               type="button"
-              onClick={() => setActiveTab('geospatial')}
+              onClick={() => setActiveTab('neighbourhoods')}
               className={cn(
                 'px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer whitespace-nowrap',
-                activeTab === 'geospatial'
+                activeTab === 'neighbourhoods'
                   ? 'bg-slate-900 text-white shadow-xs'
                   : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
               )}
             >
               <Compass className="w-3.5 h-3.5 text-emerald-400" />
-              Geospatial Demand & Supply Deficits
+              Neighbourhoods
             </button>
 
             <button
@@ -318,21 +213,33 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               )}
             >
               <Zap className="w-3.5 h-3.5 text-indigo-400" />
-              Rental Velocity & Asset Yield
+              Top listings
             </button>
 
             <button
               type="button"
-              onClick={() => setActiveTab('fleet')}
+              onClick={() => setActiveTab('appliances')}
               className={cn(
                 'px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer whitespace-nowrap',
-                activeTab === 'fleet'
+                activeTab === 'appliances'
                   ? 'bg-slate-900 text-white shadow-xs'
                   : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
               )}
             >
               <Wrench className="w-3.5 h-3.5 text-sky-400" />
-              Fractional Fleet Telemetry
+              Shared appliances
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveTab('payments')}
+              className={cn(
+                'px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer whitespace-nowrap',
+                activeTab === 'payments' ? 'bg-slate-900 text-white shadow-xs' : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+              )}
+            >
+              <DollarSign className="w-3.5 h-3.5 text-emerald-400" />
+              Payments
             </button>
 
             <button
@@ -346,21 +253,27 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               )}
             >
               <Code2 className="w-3.5 h-3.5 text-purple-400" />
-              SystemLogs Audit Stream
+              Event log
             </button>
           </div>
         </div>
 
         {/* Dashboard Main Content Scroll Container */}
         <div className="overflow-y-auto p-4 sm:p-6 space-y-6 flex-1">
-          {/* 1. Core Executive KPIs (4 Aggregated Metric Cards) */}
+          {loadError && (
+            <div role="alert" className="p-4 rounded-2xl bg-rose-50 border border-rose-200 text-sm text-rose-800">
+              {loadError}
+            </div>
+          )}
+
+          {/* Headline figures */}
           {report && (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
               {/* GMV Metric */}
               <div className="p-4 rounded-2xl bg-white border border-slate-200/90 shadow-2xs flex flex-col justify-between">
                 <div className="flex items-center justify-between mb-2">
                   <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">
-                    Total GMV / Volume
+                    Gross bookings
                   </span>
                   <div className="p-2 rounded-xl bg-emerald-50 text-emerald-700 border border-emerald-100">
                     <DollarSign className="w-4 h-4" />
@@ -368,14 +281,26 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </div>
                 <div>
                   <div className="text-2xl font-black text-slate-900 tracking-tight">
-                    R {report.kpis.totalGMVZAR.toLocaleString()}
+                    {rand(report.kpis.totalGMVZAR)}
                   </div>
                   <div className="flex items-center gap-1.5 mt-1">
-                    <span className="inline-flex items-center text-xs font-bold text-emerald-600">
-                      <ArrowUpRight className="w-3.5 h-3.5" />
-                      +{report.kpis.gmvGrowthPct}%
-                    </span>
-                    <span className="text-[11px] text-slate-400">vs prior period</span>
+                    {report.kpis.gmvGrowthPct === null ? (
+                      <span className="text-[11px] text-slate-400">No earlier period to compare</span>
+                    ) : (
+                      <>
+                        <span
+                          className={cn(
+                            'inline-flex items-center text-xs font-bold',
+                            report.kpis.gmvGrowthPct >= 0 ? 'text-emerald-600' : 'text-rose-600'
+                          )}
+                        >
+                          {report.kpis.gmvGrowthPct >= 0 ? <ArrowUpRight className="w-3.5 h-3.5" /> : <ArrowDownRight className="w-3.5 h-3.5" />}
+                          {report.kpis.gmvGrowthPct >= 0 ? '+' : ''}
+                          {report.kpis.gmvGrowthPct}%
+                        </span>
+                        <span className="text-[11px] text-slate-400">vs previous period</span>
+                      </>
+                    )}
                   </div>
                 </div>
               </div>
@@ -384,7 +309,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               <div className="p-4 rounded-2xl bg-white border border-slate-200/90 shadow-2xs flex flex-col justify-between">
                 <div className="flex items-center justify-between mb-2">
                   <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">
-                    Active Co-Ops & Utilization
+                    Co-op members
                   </span>
                   <div className="p-2 rounded-xl bg-indigo-50 text-indigo-700 border border-indigo-100">
                     <Repeat className="w-4 h-4" />
@@ -397,10 +322,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   </div>
                   <div className="flex items-center justify-between mt-1">
                     <span className="text-xs font-bold text-indigo-600">
-                      {report.kpis.fractionalUtilizationRate}% fleet capacity
-                    </span>
-                    <span className="text-[10px] text-emerald-600 font-bold bg-emerald-50 px-1.5 py-0.5 rounded">
-                      Zero Waste
+                      {report.kpis.fractionalUtilizationRate}% of this month's turns used
                     </span>
                   </div>
                 </div>
@@ -410,7 +332,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               <div className="p-4 rounded-2xl bg-white border border-slate-200/90 shadow-2xs flex flex-col justify-between">
                 <div className="flex items-center justify-between mb-2">
                   <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">
-                    Community & Host Ratio
+                    Members
                   </span>
                   <div className="p-2 rounded-xl bg-purple-50 text-purple-700 border border-purple-100">
                     <Users className="w-4 h-4" />
@@ -423,9 +345,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   </div>
                   <div className="flex items-center gap-2 mt-1">
                     <span className="text-xs font-bold text-purple-700">
-                      {report.kpis.verifiedHostRatio}% Verified Hosts
+                      {report.kpis.verifiedHostRatio}% verified hosts
                     </span>
-                    <span className="text-[10px] text-slate-400">• Trust {report.kpis.averageTrustScore}/100</span>
+                    <span className="text-[10px] text-slate-400">· avg trust {report.kpis.averageTrustScore}</span>
                   </div>
                 </div>
               </div>
@@ -434,7 +356,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               <div className="p-4 rounded-2xl bg-white border border-slate-200/90 shadow-2xs flex flex-col justify-between">
                 <div className="flex items-center justify-between mb-2">
                   <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">
-                    Completed Handovers
+                    Pickups completed
                   </span>
                   <div className="p-2 rounded-xl bg-amber-50 text-amber-700 border border-amber-100">
                     <ShieldCheck className="w-4 h-4" />
@@ -446,10 +368,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   </div>
                   <div className="flex items-center justify-between mt-1">
                     <span className="text-xs font-semibold text-slate-500">
-                      {report.kpis.activeDisputesCount} active dispute ({report.kpis.disputeRate}%)
-                    </span>
-                    <span className="text-[10px] text-emerald-700 font-bold bg-emerald-50 px-1.5 py-0.5 rounded">
-                      99.7% Trust Index
+                      {report.kpis.activeDisputesCount} open {report.kpis.activeDisputesCount === 1 ? 'dispute' : 'disputes'}
+                      {report.kpis.activeDisputesCount > 0 ? ` (${report.kpis.disputeRate}% of bookings)` : ''}
                     </span>
                   </div>
                 </div>
@@ -467,10 +387,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between mb-4 gap-2">
                   <div>
                     <h3 className="text-sm font-bold text-slate-900">
-                      Category Revenue & Booking Volume Breakdown
+                      Revenue and bookings by category
                     </h3>
                     <p className="text-xs text-slate-500">
-                      Comparison of Gross Revenue (ZAR) against total completed booking transactions
+                      Rental and co-op fees in the selected period
                     </p>
                   </div>
                   <div className="flex items-center gap-3 text-xs">
@@ -486,7 +406,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 <Suspense
                   fallback={
                     <div className="h-72 w-full flex items-center justify-center bg-slate-50/50 rounded-xl border border-slate-100 animate-pulse text-xs text-slate-400">
-                      Loading analytics visualization...
+                      Loading chart…
                     </div>
                   }
                 >
@@ -498,20 +418,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               <div className="overflow-hidden rounded-2xl bg-white border border-slate-200 shadow-2xs">
                 <div className="px-6 py-3.5 border-b border-slate-100 bg-slate-50/70 flex items-center justify-between">
                   <h4 className="text-xs font-bold text-slate-900 uppercase tracking-wider">
-                    Category Unit Economics & Average Ticket Value
+                    Categories
                   </h4>
-                  <span className="text-[11px] text-slate-500 font-mono">5 Categories Indexed</span>
+
                 </div>
                 <div className="overflow-x-auto">
                   <table className="w-full text-left text-xs">
                     <thead className="bg-slate-50 text-slate-500 font-semibold border-b border-slate-100">
                       <tr>
-                        <th className="px-6 py-3">Category Name</th>
-                        <th className="px-4 py-3">Gross Revenue</th>
+                        <th className="px-6 py-3">Category</th>
+                        <th className="px-4 py-3">Revenue</th>
                         <th className="px-4 py-3">Bookings</th>
-                        <th className="px-4 py-3">Active Listings</th>
-                        <th className="px-4 py-3">Subscribers</th>
-                        <th className="px-4 py-3 text-right">Avg Ticket Size</th>
+                        <th className="px-4 py-3">Listings</th>
+                        <th className="px-4 py-3">Co-op members</th>
+                        <th className="px-4 py-3 text-right">Average sale</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
@@ -519,13 +439,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                         <tr key={cat.categoryId} className="hover:bg-slate-50/80 transition-colors">
                           <td className="px-6 py-3.5 font-bold text-slate-900">{cat.categoryName}</td>
                           <td className="px-4 py-3.5 font-semibold text-indigo-600">
-                            R {cat.revenueZAR.toLocaleString()}
+                            {rand(cat.revenueZAR)}
                           </td>
                           <td className="px-4 py-3.5 text-slate-700 font-medium">{cat.bookingCount}</td>
                           <td className="px-4 py-3.5 text-slate-700">{cat.activeListingsCount}</td>
                           <td className="px-4 py-3.5 text-slate-700">{cat.subscriberCount}</td>
                           <td className="px-4 py-3.5 font-bold text-slate-900 text-right">
-                            R {cat.avgTicketZAR}
+                            {rand(cat.avgTicketZAR)}
                           </td>
                         </tr>
                       ))}
@@ -536,84 +456,41 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </div>
           )}
 
-          {/* TAB 2: Geospatial Demand & Density Heatmap */}
-          {activeTab === 'geospatial' && report && (
-            <div className="space-y-6">
-              <div className="p-5 rounded-2xl bg-white border border-slate-200/90 shadow-2xs">
-                <div className="flex items-start justify-between mb-4">
-                  <div>
-                    <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-                      <Compass className="w-4 h-4 text-emerald-600" />
-                      PostGIS Proximity & Neighborhood Supply Deficit Index
-                    </h3>
-                    <p className="text-xs text-slate-500 mt-0.5">
-                      Identifies high-demand zones where user search queries outpace local available supply.
-                    </p>
-                  </div>
-                  <span className="px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700 text-xs font-bold border border-emerald-200">
-                    Host Recruitment Target Map
-                  </span>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
-                  {report.geospatialDemand.map((geo) => (
-                    <div
-                      key={geo.zone}
-                      className={cn(
-                        'p-4 rounded-2xl border transition-all flex flex-col justify-between',
-                        geo.status === 'deficit'
-                          ? 'bg-rose-50/40 border-rose-200'
-                          : geo.status === 'balanced'
-                          ? 'bg-emerald-50/30 border-emerald-200'
-                          : 'bg-slate-50 border-slate-200'
-                      )}
-                    >
-                      <div>
-                        <div className="flex items-center justify-between mb-1.5">
-                          <span className="text-xs font-bold text-slate-900">{geo.zone}</span>
-                          <span
-                            className={cn(
-                              'px-2 py-0.5 rounded-full text-[10px] font-bold uppercase',
-                              geo.status === 'deficit'
-                                ? 'bg-rose-100 text-rose-800'
-                                : geo.status === 'balanced'
-                                ? 'bg-emerald-100 text-emerald-800'
-                                : 'bg-slate-200 text-slate-800'
-                            )}
-                          >
-                            {geo.status === 'deficit'
-                              ? '⚠️ Supply Deficit'
-                              : geo.status === 'balanced'
-                              ? '✓ Balanced'
-                              : 'Surplus'}
-                          </span>
-                        </div>
-                        <p className="text-[11px] text-slate-500 mb-3">{geo.neighborhood}</p>
-
-                        <div className="grid grid-cols-2 gap-2 text-xs mb-3 bg-white p-2.5 rounded-xl border border-slate-200/80">
-                          <div>
-                            <span className="text-[10px] text-slate-400 block font-semibold">
-                              ACTIVE SUPPLY
-                            </span>
-                            <span className="font-bold text-slate-900">{geo.activeListings} listings</span>
-                          </div>
-                          <div>
-                            <span className="text-[10px] text-slate-400 block font-semibold">
-                              SEARCH DEMAND
-                            </span>
-                            <span className="font-bold text-indigo-600">{geo.searchDemandCount} searches</span>
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="pt-2 border-t border-slate-200/80 text-[11px]">
-                        <span className="text-slate-500 font-medium">Recruit Hosts for: </span>
-                        <span className="font-bold text-slate-800">{geo.topMissingCategory}</span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
+          {/* Neighbourhoods */}
+          {activeTab === 'neighbourhoods' && report && (
+            <div className="overflow-hidden rounded-2xl bg-white border border-slate-200 shadow-2xs">
+              <div className="px-6 py-4 border-b border-slate-100 bg-slate-50/70">
+                <h3 className="text-sm font-bold text-slate-900">Activity by neighbourhood</h3>
+                <p className="text-[11px] text-slate-500">Where listings are, and where they are being used</p>
               </div>
+              {report.neighbourhoodActivity.length === 0 ? (
+                <p className="p-8 text-center text-xs text-slate-500">No listings yet.</p>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs">
+                    <thead className="bg-slate-50 text-slate-500 font-semibold border-b border-slate-100">
+                      <tr>
+                        <th className="px-6 py-3">Neighbourhood</th>
+                        <th className="px-4 py-3">Listings</th>
+                        <th className="px-4 py-3">Bookings</th>
+                        <th className="px-4 py-3">Co-op members</th>
+                        <th className="px-4 py-3 text-right">Revenue</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {report.neighbourhoodActivity.map((n) => (
+                        <tr key={n.neighborhood} className="hover:bg-slate-50/80 transition-colors">
+                          <td className="px-6 py-3.5 font-bold text-slate-900">{n.neighborhood}</td>
+                          <td className="px-4 py-3.5 text-slate-700">{n.activeListings}</td>
+                          <td className="px-4 py-3.5 text-slate-700">{n.totalBookings}</td>
+                          <td className="px-4 py-3.5 text-slate-700">{n.activeSubscribers}</td>
+                          <td className="px-4 py-3.5 font-semibold text-indigo-600 text-right">{rand(n.revenueZAR)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </div>
           )}
 
@@ -623,25 +500,26 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               <div className="px-6 py-4 border-b border-slate-100 bg-slate-50/70 flex items-center justify-between">
                 <div>
                   <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">
-                    Highest Utilization Assets & Rental Velocity
+                    Top listings
                   </h3>
                   <p className="text-[11px] text-slate-500">
-                    Ranked by booking frequency, occupancy rate, and turnaround hours
+                    Ranked by revenue in the selected period
                   </p>
                 </div>
-                <span className="text-xs text-indigo-600 font-semibold">Top Performing Fleet</span>
+
               </div>
 
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-xs">
                   <thead className="bg-slate-50 text-slate-500 font-semibold border-b border-slate-100">
                     <tr>
-                      <th className="px-6 py-3">Asset Title</th>
+                      <th className="px-6 py-3">Listing</th>
                       <th className="px-4 py-3">Neighborhood</th>
                       <th className="px-4 py-3">Host</th>
-                      <th className="px-4 py-3">Utilization</th>
-                      <th className="px-4 py-3">Total Volume</th>
-                      <th className="px-4 py-3">Turnaround</th>
+                      <th className="px-4 py-3">Bookings / turns</th>
+                      <th className="px-4 py-3">Utilisation</th>
+                      <th className="px-4 py-3">Revenue</th>
+                      <th className="px-4 py-3">Avg. rental</th>
                       <th className="px-4 py-3 text-right">Rating</th>
                     </tr>
                   </thead>
@@ -654,6 +532,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                         </td>
                         <td className="px-4 py-3.5 text-slate-600">{item.neighborhood}</td>
                         <td className="px-4 py-3.5 font-medium text-slate-800">{item.ownerName}</td>
+                        <td className="px-4 py-3.5 text-slate-700">{item.totalBookings}</td>
                         <td className="px-4 py-3.5">
                           <div className="flex items-center gap-2">
                             <span className="font-bold text-slate-900">{item.utilizationRatePct}%</span>
@@ -666,11 +545,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           </div>
                         </td>
                         <td className="px-4 py-3.5 font-bold text-indigo-600">
-                          R {item.totalRevenueZAR.toLocaleString()}
+                          {rand(item.totalRevenueZAR)}
                         </td>
-                        <td className="px-4 py-3.5 text-slate-600">{item.avgTurnaroundHours} hrs</td>
+                        <td className="px-4 py-3.5 text-slate-600">{item.avgRentalHours === null ? '—' : item.avgRentalHours >= 24 ? `${Math.round((item.avgRentalHours / 24) * 10) / 10} days` : `${item.avgRentalHours} hrs`}</td>
                         <td className="px-4 py-3.5 font-bold text-amber-500 text-right">
-                          ★ {item.rating.toFixed(2)}
+                          {item.rating === null ? 'New' : `★ ${item.rating.toFixed(2)}`}
                         </td>
                       </tr>
                     ))}
@@ -680,140 +559,86 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </div>
           )}
 
-          {/* TAB 4: Fractional Fleet Telemetry & Preventive Maintenance */}
-          {activeTab === 'fleet' && report && (
-            <div className="space-y-6">
-              <div className="p-5 rounded-2xl bg-white border border-slate-200/90 shadow-2xs">
-                <div className="flex items-start justify-between mb-4">
-                  <div>
-                    <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-                      <Wrench className="w-4 h-4 text-sky-600" />
-                      Shared Appliance Telemetry & Operational Health
-                    </h3>
-                    <p className="text-xs text-slate-500 mt-0.5">
-                      Monitors duty cycles across washing machines, solar stations, and 3D printers to dispatch preventive maintenance before breakdowns.
-                    </p>
-                  </div>
-                </div>
-
+          {/* Shared appliances */}
+          {activeTab === 'appliances' && report && (
+            <div className="p-5 rounded-2xl bg-white border border-slate-200/90 shadow-2xs space-y-4">
+              <div>
+                <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                  <Wrench className="w-4 h-4 text-sky-600" />
+                  Shared appliances
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">How full each co-op is and how much it is being used this month</p>
+              </div>
+              {report.sharedAppliances.length === 0 ? (
+                <p className="p-8 text-center text-xs text-slate-500">No shared appliances listed yet.</p>
+              ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {report.fractionalTelemetry.map((app) => (
-                    <div
-                      key={app.listingId}
-                      className={cn(
-                        'p-4.5 rounded-2xl border transition-all flex flex-col justify-between',
-                        app.maintenanceStatus === 'maintenance_due'
-                          ? 'bg-amber-50/40 border-amber-200'
-                          : app.maintenanceStatus === 'inspection_required'
-                          ? 'bg-purple-50/40 border-purple-200'
-                          : 'bg-white border-slate-200'
-                      )}
-                    >
-                      <div>
-                        <div className="flex items-center justify-between mb-2">
+                  {report.sharedAppliances.map((app) => {
+                    const isFull = app.activeSubscribers >= app.maxCapacity;
+                    return (
+                      <div key={app.listingId} className="p-4 rounded-2xl border border-slate-200 bg-white space-y-3">
+                        <div className="flex items-start justify-between gap-2">
                           <span className="text-xs font-bold text-slate-900">{app.title}</span>
                           <span
                             className={cn(
-                              'px-2 py-0.5 rounded-full text-[10px] font-bold',
-                              app.maintenanceStatus === 'healthy'
-                                ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                                : app.maintenanceStatus === 'maintenance_due'
-                                ? 'bg-amber-100 text-amber-800 border border-amber-300'
-                                : 'bg-purple-100 text-purple-800 border border-purple-300'
+                              'px-2 py-0.5 rounded-full text-[10px] font-bold border whitespace-nowrap',
+                              isFull ? 'bg-amber-50 text-amber-800 border-amber-200' : 'bg-emerald-50 text-emerald-700 border-emerald-200'
                             )}
                           >
-                            {app.maintenanceStatus === 'healthy'
-                              ? '✓ Fleet Healthy'
-                              : app.maintenanceStatus === 'maintenance_due'
-                              ? '⚠️ Service Due'
-                              : '🔍 Inspection Required'}
+                            {isFull ? 'Full' : `${app.maxCapacity - app.activeSubscribers} open`}
                           </span>
                         </div>
-
-                        <div className="text-[11px] text-slate-500 mb-3">
-                          Host: <strong>{app.hostName}</strong> • {app.neighborhood} • Active Co-Op Members:{' '}
-                          <strong>{app.activeSubscribers}/{app.maxCapacity}</strong>
-                        </div>
-
-                        <div className="space-y-2 mb-3">
-                          <div className="flex justify-between text-xs font-semibold">
-                            <span className="text-slate-600">Wear & Tear Index</span>
-                            <span
-                              className={cn(
-                                app.wearTearPct > 80 ? 'text-amber-600 font-bold' : 'text-slate-800'
-                              )}
-                            >
-                              {app.wearTearPct}% wear
-                            </span>
-                          </div>
-                          <div className="w-full h-2 rounded-full bg-slate-100 overflow-hidden">
-                            <div
-                              className={cn(
-                                'h-full rounded-full',
-                                app.wearTearPct > 80
-                                  ? 'bg-amber-500'
-                                  : app.wearTearPct > 60
-                                  ? 'bg-indigo-500'
-                                  : 'bg-emerald-500'
-                              )}
-                              style={{ width: `${app.wearTearPct}%` }}
-                            />
-                          </div>
-                        </div>
-
-                        <div className="grid grid-cols-2 gap-2 text-xs bg-slate-50 p-2.5 rounded-xl border border-slate-200/80">
+                        <p className="text-[11px] text-slate-500">
+                          {app.hostName} · {app.neighborhood} · {app.activeSubscribers} of {app.maxCapacity} households
+                        </p>
+                        <div className="grid grid-cols-3 gap-2 text-xs bg-slate-50 p-2.5 rounded-xl border border-slate-200/80">
                           <div>
-                            <span className="text-[10px] text-slate-400 block font-semibold">
-                              MONTHLY CYCLES
-                            </span>
-                            <span className="font-bold text-slate-900">
-                              {app.cyclesLoggedThisMonth} runs logged
-                            </span>
+                            <span className="text-[10px] text-slate-400 block font-semibold">TURNS THIS MONTH</span>
+                            <span className="font-bold text-slate-900">{app.cyclesLoggedThisMonth}</span>
                           </div>
                           <div>
-                            <span className="text-[10px] text-slate-400 block font-semibold">
-                              EST. LIFESPAN LEFT
-                            </span>
+                            <span className="text-[10px] text-slate-400 block font-semibold">TURNS LEFT</span>
+                            <span className="font-bold text-slate-900">{app.remainingQuotaThisMonth}</span>
+                          </div>
+                          <div>
+                            <span className="text-[10px] text-slate-400 block font-semibold">LAST USED</span>
                             <span className="font-bold text-slate-900">
-                              ~{app.estimatedLifespanRemainingCycles} cycles
+                              {app.lastCycleAt ? new Date(app.lastCycleAt).toLocaleDateString() : '—'}
                             </span>
                           </div>
                         </div>
                       </div>
-
-                      <div className="pt-2.5 mt-3 border-t border-slate-200/80 text-[10px] text-slate-400 flex items-center justify-between">
-                        <span>Last Cycle Triggered: {app.lastCycleAt}</span>
-                        <span className="text-indigo-600 font-semibold">IoT Relay Active</span>
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
-              </div>
+              )}
             </div>
           )}
 
           {/* TAB 5: SystemLogs Real-Time Operations Stream & JSON Inspector */}
+          {activeTab === 'payments' && <PaymentsPanel />}
+
           {activeTab === 'audit' && report && (
             <div className="space-y-4">
               {/* Filter & Search Bar */}
               <div className="p-4 rounded-2xl bg-white border border-slate-200 flex flex-col sm:flex-row items-center justify-between gap-3 shadow-2xs">
                 <div className="flex items-center gap-2 w-full sm:w-auto">
                   <span className="text-xs font-bold text-slate-600 uppercase tracking-wider shrink-0">
-                    Event Filter:
+                    Show:
                   </span>
                   <select
                     value={logFilter}
                     onChange={(e) => setLogFilter(e.target.value)}
                     className="px-3 py-1.5 text-xs bg-slate-50 rounded-xl border border-slate-200 font-semibold outline-none text-slate-800"
                   >
-                    <option value="ALL">All Event Types ({report.recentSystemLogs.length})</option>
-                    <option value="BOOKING_CREATED">BOOKING_CREATED</option>
-                    <option value="HANDOVER_COMPLETED">HANDOVER_COMPLETED</option>
-                    <option value="FRACTIONAL_USE_LOGGED">FRACTIONAL_USE_LOGGED</option>
-                    <option value="AUTH_SIGNIN">AUTH_SIGNIN</option>
-                    <option value="AUTH_SIGNUP">AUTH_SIGNUP</option>
-                    <option value="IMAGE_UPLOADED">IMAGE_UPLOADED</option>
-                    <option value="LISTING_CREATED">LISTING_CREATED</option>
+                    <option value="ALL">All events ({report.recentSystemLogs.length})</option>
+                    {Array.from(new Set(report.recentSystemLogs.map((l) => l.eventType)))
+                      .sort()
+                      .map((type) => (
+                        <option key={type} value={type}>
+                          {type}
+                        </option>
+                      ))}
                   </select>
                 </div>
 
@@ -823,7 +648,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     type="text"
                     value={searchLogQuery}
                     onChange={(e) => setSearchLogQuery(e.target.value)}
-                    placeholder="Search payload metadata or user..."
+                    placeholder="Search events…"
+                    aria-label="Search events"
                     className="w-full pl-8 pr-3 py-1.5 text-xs bg-slate-50 rounded-xl border border-slate-200 outline-none"
                   />
                 </div>
@@ -835,15 +661,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 <div className="lg:col-span-7 overflow-hidden rounded-2xl bg-white border border-slate-200 shadow-2xs">
                   <div className="px-4 py-3 border-b border-slate-100 bg-slate-50/80 flex items-center justify-between">
                     <span className="text-xs font-bold text-slate-700">
-                      Immutable System Logs ({filteredLogs.length})
+                      Events ({filteredLogs.length})
                     </span>
-                    <span className="text-[10px] text-slate-400 font-mono">Neon JSONB Audit Trail</span>
+
                   </div>
 
                   <div className="divide-y divide-slate-100 max-h-96 overflow-y-auto">
                     {filteredLogs.length === 0 ? (
                       <div className="p-8 text-center text-xs text-slate-400">
-                        No system events match current filter.
+                        No events match this filter.
                       </div>
                     ) : (
                       filteredLogs.map((log) => {
@@ -908,7 +734,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       <div className="flex items-center justify-between pb-2.5 mb-2 border-b border-slate-800 shrink-0">
                         <div className="flex items-center gap-1.5 text-emerald-400 font-bold text-[11px]">
                           <Code2 className="w-3.5 h-3.5" />
-                          <span>JSONB Metadata Inspector</span>
+                          <span>Event details</span>
                         </div>
                         <button
                           type="button"
@@ -948,7 +774,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     </div>
                   ) : (
                     <div className="flex items-center justify-center h-full text-slate-500 text-xs">
-                      Select a log record from the stream to inspect its JSONB metadata payload.
+                      Select an event to see its details.
                     </div>
                   )}
                 </div>

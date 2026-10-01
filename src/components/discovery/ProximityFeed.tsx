@@ -10,7 +10,7 @@ import {
   AlertCircle,
   HelpCircle,
 } from 'lucide-react';
-import { ListingModel, PricingTierModel } from '../../types';
+import { ListingModel } from '../../types';
 import { ListingCard } from '../listings/ListingCard';
 import { LocationState } from './SearchHeader';
 import { cn } from '../../lib/utils';
@@ -23,7 +23,6 @@ export interface ProximityFeedProps {
   selectedSubcategorySlug?: string | null;
   searchTerm: string;
   onSelectListing: (listing: ListingModel) => void;
-  onQuickSubscribe?: (listing: ListingModel, tier: PricingTierModel) => void;
   isSubscribedCheck?: (listingId: string) => boolean;
   onExpandRadius: (newRadius: number) => void;
   onResetFilters: () => void;
@@ -38,7 +37,6 @@ export const ProximityFeed: React.FC<ProximityFeedProps> = ({
   selectedSubcategorySlug,
   searchTerm,
   onSelectListing,
-  onQuickSubscribe,
   isSubscribedCheck,
   onExpandRadius,
   onResetFilters,
@@ -67,7 +65,7 @@ export const ProximityFeed: React.FC<ProximityFeedProps> = ({
               <p className="text-[11px] text-slate-500 flex items-center gap-1 mt-0.5">
                 <Shield className="w-3 h-3 text-emerald-600 inline shrink-0" />
                 <span>
-                  Host privacy shield active: distances are approximate until booking confirmation.
+                  Distances are approximate. Hosts share their exact address after you book.
                 </span>
               </p>
             </div>
@@ -95,12 +93,12 @@ export const ProximityFeed: React.FC<ProximityFeedProps> = ({
             <Compass className="w-7 h-7 text-indigo-600" />
           </div>
           <h3 className="text-lg font-bold text-slate-900 mb-1">
-            No listings found in this proximity
+            Nothing here yet
           </h3>
           <p className="text-xs sm:text-sm text-slate-500 max-w-md mb-6 leading-relaxed">
             {isGeoActive
-              ? `There are currently no items matching your criteria within ${radiusKm} km of ${locationState.label}. Try expanding your search radius or clearing active filters.`
-              : 'No items match your current filter and search criteria. Try a different keyword or category.'}
+              ? `We couldn't find anything within ${radiusKm} km of ${locationState.label}. Try searching a little further out.`
+              : 'Nothing matches that search. Try another word or category.'}
           </p>
           <div className="flex flex-wrap items-center justify-center gap-3">
             {isGeoActive && radiusKm < 50 && (
@@ -110,7 +108,7 @@ export const ProximityFeed: React.FC<ProximityFeedProps> = ({
                 onClick={() => onExpandRadius(50)}
                 className="px-4 py-2 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-xl shadow-xs transition-colors cursor-pointer"
               >
-                Expand Search to 50 km
+                Search within 50 km
               </button>
             )}
             <button
@@ -119,7 +117,7 @@ export const ProximityFeed: React.FC<ProximityFeedProps> = ({
               onClick={onResetFilters}
               className="px-4 py-2 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl border border-slate-200/80 transition-colors cursor-pointer"
             >
-              Clear All Filters
+              Clear filters
             </button>
           </div>
         </div>
@@ -133,7 +131,6 @@ export const ProximityFeed: React.FC<ProximityFeedProps> = ({
               key={listing.id}
               listing={listing}
               onSelect={onSelectListing}
-              onQuickSubscribe={onQuickSubscribe}
               isSubscribed={isSubscribedCheck ? isSubscribedCheck(listing.id) : false}
             />
           ))}

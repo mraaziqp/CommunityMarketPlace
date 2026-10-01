@@ -1,115 +1,64 @@
-# ShareHub — Community P2P Rental & Fractional Sharing Marketplace
+# ShareHub: community rentals and shared appliances
 
-A hyper-local marketplace for renting and co-owning physical things: power
-tools, appliances on a fractional subscription, rooms and studios, vehicles and
-gear — scoped to a neighbourhood and to private trust groups.
+A neighbourhood marketplace for borrowing and co-owning things: tools and gear by the day, rooms and studios by the hour or night, and shared appliances (washers, 3D printers, solar batteries) through small monthly co-ops. Circles keep listings private to a building or makerspace.
 
-Built as a React 19 + Vite single-page app, deployed as static files on AWS.
+It is part of the ARP Cloud Solutions ecosystem and lives at **https://market.arpcloudsolutions.co.za**.
 
 ```bash
 npm install
-npm run dev       # http://localhost:3000
+npm run dev      # web on http://localhost:3000, API on :8787, embedded Postgres
+npm test         # server integration tests
 ```
-
----
 
 ## What it does
 
-- **Proximity discovery** — geolocation search with Haversine distance and
-  privacy-rounded display ("~2.4 km away"), neighbourhood and category filters,
-  all reflected in shareable URLs.
-- **Fractional subscriptions** — appliances sold as a capped number of uses per
-  period rather than a rental. Quota tracking, usage logging, co-op caps.
-- **Digital handover** — verification codes, condition logs with photos, return
-  inspection and dispute initiation.
-- **Escrow payments** — funds held, captured on handover confirmation, refunded
-  on dispute resolution.
-- **Private trust groups** — invite-code co-ops that scope listing visibility.
-- **Reviews and trust scores** — multi-axis ratings feeding a host trust score.
-- **Executive admin dashboard** — GMV, utilisation, category revenue, fleet
-  telemetry, and an immutable system audit log.
-- **Installable PWA** — offline app shell, maskable icons, mobile navigation.
+- **Discovery**: search by keyword, category, city and distance, with shareable URLs. Circle-only listings are visible only to that circle's members.
+- **Rentals**: book dates at a price the server works out, pay on PayFast, confirm pickup with a code from the host, and have the host check the item back in. After the return, the host's payout and the renter's deposit refund are tracked as due.
+- **Shared appliances**: monthly PayFast subscriptions with a capped number of households, a set number of turns per month that refresh on renewal, and per-member access codes.
+- **Reviews and trust scores**: the renter reviews the host once, after the rental is finished.
+- **Admin dashboard**: revenue, members, co-op usage, top listings, neighbourhoods and the event log, plus payments, payouts owed and a **live payment test** for any amount.
+- **Ecosystem bot API**: full read and write, export and import, marketplace actions and signed event webhooks. See [docs/BOT_API.md](docs/BOT_API.md).
 
 ## Architecture
 
 ```
-index.html
-└── src/main.tsx → src/App.tsx
-    ├── src/components/   feature UI (discovery, listings, bookings, admin, …)
-    ├── src/types/        the models the UI is written against
-    ├── src/data/         seed catalogue and category tree
-    └── actions/          the data layer the components call
-        └── db/           browser-native persistent store
+src/            React 19 + Vite web app; talks only to /api (src/api/client.ts)
+server/         Hono server: app API, bot API (/api/v1), PayFast ITN, static files
+  payfast.ts    checkout signing and ITN verification
+  persistence.ts  Postgres (Drizzle) — embedded PGlite in development and tests
+actions/        business rules (bookings, co-ops, payments, reviews, circles, …)
+db/             schema, migrations and the in-memory working set
+docs/           deployment and bot API
+scripts/aws/    provision.sh (one-time AWS setup) and deploy.sh (each release)
 ```
 
-### Where the data lives
+How data flows:
 
-**In the visitor's browser, and nowhere else.**
-
-ShareHub is served as static files. There is no server process and no database
-connection, because a Postgres URL in a browser bundle is a Postgres URL handed
-to every visitor.
-
-`db/index.ts` holds the working set as typed `Map`s and writes through to
-`localStorage` on every mutation, so a refresh, a reopened tab or a relaunched
-PWA resumes where it left off. A first visit seeds a populated demo
-neighbourhood. `db/schema.ts` keeps the Drizzle table definitions, and the `db`
-export presents a Drizzle-shaped facade (`query` / `insert` / `update` /
-`select` / `transaction`), so the `actions/` layer reads like real data access.
-
-The consequences are worth being explicit about:
-
-- Data is **per-browser**. Two visitors do not see each other's listings, and
-  clearing site data resets the app to its seed state.
-- `localStorage` caps out around 5MB. Uploaded listing photos are downscaled to
-  1280px and re-encoded before being stored (`actions/storage.ts`) to stay
-  inside that budget.
-- Authentication is a **role switcher**, not an identity system. `DEMO_ACCOUNTS`
-  in `actions/auth.ts` provides admin, host and renter personas.
-
-### Making it multi-user
-
-Every component calls `actions/`, and `actions/` is the only thing that touches
-`db/`. To put real data behind it, reimplement the `actions/` functions as
-`fetch` calls to an API and leave the components alone. `db/migrations/` holds
-the Postgres schema and PostGIS indexes that design assumed.
+- Postgres is the system of record.
+- The server keeps a working copy in memory, and each write request runs as a unit of work: it is committed to Postgres in one transaction, or fully rolled back.
+- Because of this, run **one** server instance per database.
+- Sessions are HTTP-only cookies, and passwords are scrypt hashes.
+- Admin access comes from the server-side `ADMIN_EMAILS` setting.
 
 ## Commands
 
 | Command | What it does |
 | :--- | :--- |
-| `npm run dev` | Dev server on port 3000 |
-| `npm run build` | Typecheck, then build to `dist/` |
-| `npm run preview` | Serve the built output on port 4173 |
-| `npm run typecheck` | `tsc --noEmit` |
+| `npm run dev` | Web app and API together, with an embedded database in `.data/` |
+| `npm test` | Server integration tests (accounts, visibility, PayFast lifecycle, bot API, rollback, persistence) |
+| `npm run build` | Typecheck, build the web app to `dist/` and the server to `dist-server/` |
+| `npm start` | Run the built server (serves `dist/` and `/api`) |
+| `npm run db:generate` | Generate a migration after changing `db/schema.ts` |
 
-`npm run build` runs `tsc --noEmit` first, so a type error fails the build
-rather than shipping.
+## Handover and roadmap
 
-## Configuration
+- [GEMINI.md](GEMINI.md): the rules, architecture and production state for whoever (or whichever AI agent) works on this next.
+- [docs/UPGRADE_PLAN.md](docs/UPGRADE_PLAN.md): the next upgrade (personal dashboards, admin console, home page), step by step.
 
-None. The app reads no environment variables — see
-[`.env.production.example`](./.env.production.example) for why, and for the AWS
-credentials the deployment workflow needs.
+## Configuration and deployment
 
-## Deploying
-
-Full instructions in [AWS_DEPLOYMENT_GUIDE.md](./AWS_DEPLOYMENT_GUIDE.md).
-
-**AWS Amplify Hosting** is the primary target. The app must be registered with
-platform `WEB`, not `WEB_COMPUTE` — an app created as a Next.js SSR app fails
-during provisioning with `Cannot read 'next' version in package.json`, before
-`amplify.yml` is ever read. Fix it once with:
-
-```bash
-./aws/amplify-configure.sh <APP_ID> <REGION>
-```
-
-which also installs the SPA rewrite rule that deep links need.
-
-Also supported: S3 + CloudFront via `aws/cloudformation-template.yml` and the
-GitHub Actions workflow, or a container via the included `Dockerfile` and
-`nginx.conf`.
+- The server's settings are listed in [.env.production.example](.env.production.example). None of them are ever sent to the browser.
+- Production runs on AWS: EC2 with Caddy for HTTPS, plus RDS Postgres. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for how to deploy it.
 
 ## Licence
 

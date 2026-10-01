@@ -164,6 +164,7 @@ export interface UserModel {
   neighborhood?: string | null;
   trustScore: number;
   isHost: boolean;
+  suspended?: boolean;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -343,6 +344,26 @@ export interface BookingModel {
   conditionLogs?: ConditionLogModel[];
   payment?: PaymentModel | null;
   hasReview?: boolean;
+  hostId?: string;
+  hostName?: string;
+  /** Whether the person viewing this booking is the renter or the listing's host. */
+  viewerRole?: 'renter' | 'host';
+}
+
+/** A human-readable entry in a member's own activity history. */
+export interface ActivityHistoryItem {
+  id: string;
+  kind: 'booking' | 'pickup' | 'return' | 'usage' | 'payment' | 'review' | 'listing' | 'circle' | 'account' | 'dispute';
+  title: string;
+  detail?: string;
+  createdAt: string;
+}
+
+export interface MemberActivity {
+  subscriptions: UserSubscriptionModel[];
+  bookings: BookingModel[];
+  usageLogs: UsageLogModel[];
+  history: ActivityHistoryItem[];
 }
 
 export interface FilterState {
@@ -356,19 +377,22 @@ export interface FilterState {
 
 /**
  * ============================================================================
- * EXECUTIVE ADMIN INTELLIGENCE INTERFACES
+ * ADMIN DASHBOARD REPORT
+ * Every figure is aggregated from the store; nothing is estimated or padded.
  * ============================================================================
  */
 export interface ExecutiveKPIs {
   totalGMVZAR: number;
-  gmvGrowthPct: number;
+  /** Change against the previous period of the same length; null when there is nothing to compare. */
+  gmvGrowthPct: number | null;
   activeSubscriptionsCount: number;
-  fractionalUtilizationRate: number; // e.g. 84.5%
+  /** Share of this period's co-op allowance that members have used. */
+  fractionalUtilizationRate: number;
   totalUsersCount: number;
-  verifiedHostRatio: number; // e.g. 42%
+  verifiedHostRatio: number;
   completedHandoversCount: number;
   activeDisputesCount: number;
-  disputeRate: number; // e.g. 0.3%
+  disputeRate: number;
   averageTrustScore: number;
 }
 
@@ -389,26 +413,25 @@ export interface RentalVelocityItem {
   categoryName: string;
   neighborhood: string;
   ownerName: string;
+  /** Rentals plus co-op cycles in the period. */
   totalBookings: number;
   utilizationRatePct: number;
   totalRevenueZAR: number;
-  avgTurnaroundHours: number;
-  rating: number;
+  /** Average rental length; null for co-ops, which are used in cycles. */
+  avgRentalHours: number | null;
+  rating: number | null;
   status: 'high_velocity' | 'steady' | 'underutilized';
 }
 
-export interface GeospatialDensityData {
-  zone: string;
+export interface NeighbourhoodActivityData {
   neighborhood: string;
   activeListings: number;
   totalBookings: number;
-  searchDemandCount: number;
-  supplyDemandRatio: number;
-  status: 'deficit' | 'balanced' | 'surplus';
-  topMissingCategory: string;
+  activeSubscribers: number;
+  revenueZAR: number;
 }
 
-export interface FractionalApplianceTelemetry {
+export interface SharedApplianceStatus {
   listingId: string;
   title: string;
   hostName: string;
@@ -417,18 +440,15 @@ export interface FractionalApplianceTelemetry {
   maxCapacity: number;
   cyclesLoggedThisMonth: number;
   remainingQuotaThisMonth: number;
-  wearTearPct: number; // e.g. 74%
-  estimatedLifespanRemainingCycles: number;
-  maintenanceStatus: 'healthy' | 'maintenance_due' | 'inspection_required';
-  lastCycleAt: string;
+  lastCycleAt: string | null;
 }
 
 export interface AdminAnalyticsReport {
   kpis: ExecutiveKPIs;
   categoryPerformance: CategoryPerformanceData[];
   rentalVelocity: RentalVelocityItem[];
-  geospatialDemand: GeospatialDensityData[];
-  fractionalTelemetry: FractionalApplianceTelemetry[];
+  neighbourhoodActivity: NeighbourhoodActivityData[];
+  sharedAppliances: SharedApplianceStatus[];
   recentSystemLogs: SystemLogModel[];
   generatedAt: string;
 }

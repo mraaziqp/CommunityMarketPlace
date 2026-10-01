@@ -1,15 +1,9 @@
-
 import { db, memoryStore } from '../db';
-import {
-  userSubscriptions,
-  usageLogs,
-  systemLogs,
-  type UsageLog,
-  type SystemLog,
-  type UserSubscription,
-} from '../db/schema';
-import { eq, and, sql, gt } from 'drizzle-orm';
+import type { UsageLog, SystemLog, UserSubscription } from '../db/schema';
 import { validateInput, LogFractionalUsageSchema } from '../lib/validations';
+
+/** How long an unpaid booking or membership holds its slot. Keep in step with payments.ts. */
+const HOLD_MINUTES = 30;
 
 export interface LogFractionalUseResult {
   success: boolean;
@@ -29,26 +23,149 @@ export interface LogFractionalUseResult {
     notes?: string | null;
     verificationCode?: string | null;
   };
-  systemLog: {
-    id: string;
-    eventType: string;
-    userId: string;
-    targetId: string;
-    metadata: Record<string, unknown>;
-    createdAt: string;
-  };
+}
+
+function newId(prefix: string) {
+  return `${prefix}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+}
+
+function addMonths(date: Date, months: number) {
+  const d = new Date(date);
+  d.setMonth(d.getMonth() + months);
+  return d;
 }
 
 /**
- * Server Action: Log a fractional usage event (e.g. 1 washer cycle / 1 printer job)
- *
- * Implements an atomic Drizzle database transaction (`db.transaction`) with strict concurrency guards:
- * 1. Validates input schema via Zod (subscriptionId, userId, unitsUsed, notes, verificationCode).
- * 2. Enforces atomic SQL update with `WHERE remaining_uses_this_period > 0` to eliminate phantom quota deductions.
- * 3. Decrements remaining_uses atomically and increments total_uses_used by 1.
- * 4. Inserts an immutable row into `UsageLogs`.
- * 5. Inserts an immutable audit record into `SystemLogs` with JSONB metadata.
- * 6. Throws descriptive error on unauthorized access or quota exhaustion.
+ * The member's access code for a shared appliance. Derived from the
+ * subscription id so it is stable without a dedicated column.
+ */
+export function accessCodeFor(subscriptionId: string, accessMethod: string): string {
+  let h = 0;
+  for (const ch of subscriptionId) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  const digits = String(1000 + (h % 9000));
+  return `${accessMethod === 'smart_plug' ? 'PLUG' : 'PIN'}-${digits}`;
+}
+
+/**
+ * Rolls a monthly co-op subscription into its current billing period and
+ * restores the allowance. Called whenever subscriptions are read, so an
+ * allowance refreshes on its own when the month turns over.
+ */
+export function renewSubscriptionIfDue(sub: UserSubscription, now = new Date()): UserSubscription {
+  if (sub.status !== 'active' || sub.currentPeriodEnd > now) return sub;
+  const tier = memoryStore.pricingTiers.get(sub.pricingTierId);
+  // One-off usage packs do not renew.
+  if (!tier || tier.type !== 'monthly_subscription') return sub;
+
+  let start = sub.currentPeriodStart;
+  let end = sub.currentPeriodEnd;
+  while (end <= now) {
+    start = end;
+    end = addMonths(end, 1);
+  }
+  const renewed: UserSubscription = {
+    ...sub,
+    currentPeriodStart: start,
+    currentPeriodEnd: end,
+    renewsAt: end,
+    remainingUsesThisPeriod: tier.usageLimitPerPeriod ?? sub.remainingUsesThisPeriod,
+    totalUsesUsed: 0,
+    updatedAt: now,
+  };
+  memoryStore.userSubscriptions.set(sub.id, renewed);
+  return renewed;
+}
+
+/**
+ * Start joining a shared-appliance co-op. Creates a membership awaiting its
+ * first payment; PayFast's confirmation activates it (see payments.ts).
+ * Enforces the household cap (counting recent unpaid holds) and one
+ * membership per member per listing.
+ */
+export async function subscribeToListing(
+  userId: string,
+  listingId: string,
+  pricingTierId: string
+): Promise<{ subscriptionId: string }> {
+  return await db.transaction(async () => {
+    const user = memoryStore.users.get(userId);
+    if (!user) throw new Error('Please sign in to join a co-op.');
+
+    const listing = memoryStore.listings.get(listingId);
+    if (!listing || !listing.isAvailable) throw new Error('This listing is no longer available.');
+    if (listing.ownerId === userId) throw new Error('This is your own listing.');
+
+    const tier = memoryStore.pricingTiers.get(pricingTierId);
+    if (!tier || tier.listingId !== listingId || !tier.isActive) {
+      throw new Error('That plan is no longer offered. Please pick another.');
+    }
+    if (tier.type !== 'monthly_subscription' && tier.type !== 'usage_pack') {
+      throw new Error('That plan is booked by date, not joined.');
+    }
+
+    const mine = Array.from(memoryStore.userSubscriptions.values()).filter(
+      (s) => s.userId === userId && s.listingId === listingId
+    );
+    if (mine.some((s) => s.status === 'active')) throw new Error("You're already part of this co-op.");
+    const holdMs = HOLD_MINUTES * 60 * 1000;
+    const isFreshHold = (s: UserSubscription) => s.status === 'pending_payment' && Date.now() - s.createdAt.getTime() < holdMs;
+    // Re-use an unpaid attempt on the same plan rather than stacking holds.
+    const existing = mine.find((s) => isFreshHold(s) && s.pricingTierId === pricingTierId);
+    if (existing) return { subscriptionId: existing.id };
+
+    const heldSpots = Array.from(memoryStore.userSubscriptions.values()).filter(
+      (s) => s.listingId === listingId && isFreshHold(s)
+    ).length;
+    if (listing.currentSubscribersCount + heldSpots >= listing.maxSubscribers) {
+      throw new Error('This co-op is full right now. Check back when a spot opens up.');
+    }
+
+    const now = new Date();
+    const periodEnd = tier.type === 'monthly_subscription' ? addMonths(now, 1) : addMonths(now, 12);
+
+    const subscription: UserSubscription = {
+      id: newId('sub'),
+      userId,
+      listingId,
+      pricingTierId,
+      status: 'pending_payment',
+      remainingUsesThisPeriod: tier.usageLimitPerPeriod ?? 10,
+      totalUsesUsed: 0,
+      currentPeriodStart: now,
+      currentPeriodEnd: periodEnd,
+      renewsAt: tier.type === 'monthly_subscription' ? periodEnd : null,
+      cancelledAt: null,
+      stripeSubscriptionId: null,
+      gatewayToken: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    memoryStore.userSubscriptions.set(subscription.id, subscription);
+
+    const logId = newId('sys_log');
+    memoryStore.systemLogs.set(logId, {
+      id: logId,
+      eventType: 'BOOKING_CREATED',
+      userId,
+      targetId: subscription.id,
+      metadata: {
+        kind: 'subscription',
+        listingId,
+        listingTitle: listing.title,
+        tierName: tier.name,
+        priceInCents: tier.priceInCents,
+        allowance: subscription.remainingUsesThisPeriod,
+      },
+      createdAt: now,
+    });
+
+    return { subscriptionId: subscription.id };
+  });
+}
+
+/**
+ * Record one use of a shared appliance (a wash, a print job, a charge) and
+ * deduct it from the member's allowance for this period.
  */
 export async function logFractionalUse(
   subscriptionId: string,
@@ -56,7 +173,6 @@ export async function logFractionalUse(
   notes?: string,
   verificationCode?: string
 ): Promise<LogFractionalUseResult> {
-  // 1. Strict Zod Schema Validation
   const validated = validateInput(LogFractionalUsageSchema, {
     subscriptionId,
     userId,
@@ -64,80 +180,37 @@ export async function logFractionalUse(
     verificationCode,
   });
 
-  const cycleNotes = validated.notes || 'Standard fractional cycle run';
-  const iotCode = validated.verificationCode || `IOT_PULSE_${Math.floor(100000 + Math.random() * 900000)}`;
+  const cycleNotes = validated.notes?.trim() || 'Standard cycle';
 
-  // 2. Execute in an atomic Drizzle Transaction with Snapshot Isolation & Atomic Decrement
-  return await db.transaction(async (tx: any) => {
-    // a) Retrieve & lock UserSubscription
-    let subscription: UserSubscription | null = null;
-
-    if (memoryStore.userSubscriptions.has(validated.subscriptionId)) {
-      subscription = memoryStore.userSubscriptions.get(validated.subscriptionId) || null;
+  return await db.transaction(async () => {
+    const stored = memoryStore.userSubscriptions.get(validated.subscriptionId);
+    if (!stored || stored.userId !== validated.userId) {
+      throw new Error("We couldn't find that co-op membership on your account.");
     }
+    const subscription = renewSubscriptionIfDue(stored);
 
-    // If using SQL query client
-    if (!subscription && tx.query?.userSubscriptions) {
-      subscription = await tx.query.userSubscriptions.findFirst({
-        where: and(
-          eq(userSubscriptions.id, validated.subscriptionId),
-          eq(userSubscriptions.userId, validated.userId)
-        ),
-      });
-    }
-
-    if (!subscription) {
-      // Fallback find for testing / simulated demo accounts
-      for (const sub of memoryStore.userSubscriptions.values()) {
-        if (sub.id === validated.subscriptionId) {
-          subscription = sub;
-          break;
-        }
-      }
-    }
-
-    if (!subscription) {
-      throw new Error(
-        `Unauthorized or Subscription Not Found: Subscription '${validated.subscriptionId}' does not exist for user '${validated.userId}'.`
-      );
-    }
-
-    // Ensure status is active
     if (subscription.status !== 'active') {
-      throw new Error(
-        `Subscription Inactive: Subscription status is currently '${subscription.status}'. Only active subscriptions can consume fractional quotas.`
-      );
+      throw new Error('This membership is not active.');
     }
-
-    // Atomic Concurrency Guard: Enforce remaining_uses > 0
     if (subscription.remainingUsesThisPeriod <= 0) {
       throw new Error(
-        `Quota Depleted: You have 0 remaining uses in the current billing period. Quota resets on ${new Date(
-          subscription.currentPeriodEnd
-        ).toLocaleDateString()}.`
+        `You've used all your turns for this period. They refresh on ${subscription.currentPeriodEnd.toLocaleDateString()}.`
       );
     }
 
-    const previousRemaining = subscription.remainingUsesThisPeriod;
-    const newRemaining = previousRemaining - 1;
-    const previousTotalUsed = subscription.totalUsesUsed || 0;
-    const newTotalUsed = previousTotalUsed + 1;
-    const logId = `usg_log_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-    const systemLogId = `sys_log_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const newRemaining = subscription.remainingUsesThisPeriod - 1;
+    const newTotalUsed = (subscription.totalUsesUsed || 0) + 1;
     const eventTimestamp = new Date();
 
-    // Atomic SQL / in-memory decrement
-    const updatedSubData: UserSubscription = {
+    memoryStore.userSubscriptions.set(subscription.id, {
       ...subscription,
       remainingUsesThisPeriod: newRemaining,
       totalUsesUsed: newTotalUsed,
       updatedAt: eventTimestamp,
-    };
-    memoryStore.userSubscriptions.set(validated.subscriptionId, updatedSubData);
+    });
 
-    // Insert record into UsageLogs table
     const usageLogRecord: UsageLog = {
-      id: logId,
+      id: newId('usage'),
       subscriptionId: subscription.id,
       listingId: subscription.listingId,
       userId: validated.userId,
@@ -146,35 +219,26 @@ export async function logFractionalUse(
       unitsUsed: 1,
       status: 'completed',
       notes: cycleNotes,
-      verificationCode: iotCode,
+      verificationCode: validated.verificationCode || null,
       createdAt: eventTimestamp,
     };
-    memoryStore.usageLogs.set(logId, usageLogRecord);
+    memoryStore.usageLogs.set(usageLogRecord.id, usageLogRecord);
 
-    // Insert record into SystemLogs table (Immutable JSONB Audit Ledger)
+    const listing = memoryStore.listings.get(subscription.listingId);
     const systemLogRecord: SystemLog = {
-      id: systemLogId,
+      id: newId('sys_log'),
       eventType: 'FRACTIONAL_USE_LOGGED',
       userId: validated.userId,
       targetId: subscription.id,
       metadata: {
-        action: 'FRACTIONAL_QUOTA_DEDUCTION',
-        subscriptionId: subscription.id,
         listingId: subscription.listingId,
-        pricingTierId: subscription.pricingTierId,
-        previousRemainingUses: previousRemaining,
-        newRemainingUses: newRemaining,
-        unitsDeducted: 1,
-        totalUsesUsed: newTotalUsed,
-        verificationCode: iotCode,
-        cycleNotes: cycleNotes,
-        clientIp: 'edge-client-worker',
-        executionEnvironment: 'Neon Serverless + Next.js 15 App Router',
-        timestampIso: eventTimestamp.toISOString(),
+        listingTitle: listing?.title,
+        notes: cycleNotes,
+        remainingUses: newRemaining,
       },
       createdAt: eventTimestamp,
     };
-    memoryStore.systemLogs.set(systemLogId, systemLogRecord);
+    memoryStore.systemLogs.set(systemLogRecord.id, systemLogRecord);
 
     return {
       success: true,
@@ -194,15 +258,6 @@ export async function logFractionalUse(
         notes: usageLogRecord.notes,
         verificationCode: usageLogRecord.verificationCode,
       },
-      systemLog: {
-        id: systemLogRecord.id,
-        eventType: systemLogRecord.eventType,
-        userId: systemLogRecord.userId,
-        targetId: systemLogRecord.targetId,
-        metadata: systemLogRecord.metadata,
-        createdAt: systemLogRecord.createdAt.toISOString(),
-      },
     };
   });
 }
-

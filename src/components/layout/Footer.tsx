@@ -1,72 +1,54 @@
 import React from 'react';
-import { ShieldCheck, Users, Repeat, Lock, HeartHandshake } from 'lucide-react';
+import { ShieldCheck, Users, Repeat, KeyRound } from 'lucide-react';
+
+const VALUE_PROPS = [
+  {
+    icon: <Users className="w-5 h-5" />,
+    color: 'text-indigo-400',
+    title: 'Small, friendly co-ops',
+    body: 'Shared appliances are capped at a handful of households, so there is rarely a wait.',
+  },
+  {
+    icon: <ShieldCheck className="w-5 h-5" />,
+    color: 'text-emerald-400',
+    title: 'Deposits that come back',
+    body: 'We hold your payment until the item is returned, then your deposit goes straight back.',
+  },
+  {
+    icon: <Repeat className="w-5 h-5" />,
+    color: 'text-amber-400',
+    title: 'Fair turns for everyone',
+    body: 'Every member can see how many turns they have left each month.',
+  },
+  {
+    icon: <KeyRound className="w-5 h-5" />,
+    color: 'text-sky-400',
+    title: 'Easy pickup',
+    body: 'Collect with a simple code from your host, or unlock shared appliances with your own.',
+  },
+];
 
 export const Footer: React.FC = () => {
   return (
     <footer className="bg-slate-900 text-slate-300 pt-12 pb-8 border-t border-slate-800">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        {/* Core Value Props Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-8 pb-10 border-b border-slate-800 text-left">
-          <div className="flex items-start gap-3">
-            <div className="p-2.5 rounded-xl bg-slate-800 text-indigo-400">
-              <Users className="w-5 h-5" />
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-8 pb-10 border-b border-slate-800 text-left">
+          {VALUE_PROPS.map((p) => (
+            <div key={p.title} className="flex items-start gap-3">
+              <div className={`p-2.5 rounded-xl bg-slate-800 ${p.color}`}>{p.icon}</div>
+              <div>
+                <h4 className="font-semibold text-white text-sm mb-1">{p.title}</h4>
+                <p className="text-xs text-slate-400 leading-relaxed">{p.body}</p>
+              </div>
             </div>
-            <div>
-              <h4 className="font-semibold text-white text-sm mb-1">Capped Co-Ops</h4>
-              <p className="text-xs text-slate-400 leading-relaxed">
-                Appliance subscriptions are hard-capped at 3-5 users to eliminate waiting lines.
-              </p>
-            </div>
-          </div>
-
-          <div className="flex items-start gap-3">
-            <div className="p-2.5 rounded-xl bg-slate-800 text-emerald-400">
-              <ShieldCheck className="w-5 h-5" />
-            </div>
-            <div>
-              <h4 className="font-semibold text-white text-sm mb-1">Community Trust</h4>
-              <p className="text-xs text-slate-400 leading-relaxed">
-                Every member is identity-verified and backed by community security deposits.
-              </p>
-            </div>
-          </div>
-
-          <div className="flex items-start gap-3">
-            <div className="p-2.5 rounded-xl bg-slate-800 text-amber-400">
-              <Repeat className="w-5 h-5" />
-            </div>
-            <div>
-              <h4 className="font-semibold text-white text-sm mb-1">Usage Ledger</h4>
-              <p className="text-xs text-slate-400 leading-relaxed">
-                Timestamped records ensure transparent quota tracking and fair machine sharing.
-              </p>
-            </div>
-          </div>
-
-          <div className="flex items-start gap-3">
-            <div className="p-2.5 rounded-xl bg-slate-800 text-sky-400">
-              <Lock className="w-5 h-5" />
-            </div>
-            <div>
-              <h4 className="font-semibold text-white text-sm mb-1">Smart Access</h4>
-              <p className="text-xs text-slate-400 leading-relaxed">
-                Secure digital PINs, IoT smart plugs, and QR codes control physical access.
-              </p>
-            </div>
-          </div>
+          ))}
         </div>
 
-        {/* Bottom copyright & attribution */}
-        <div className="pt-8 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-slate-500">
-          <div className="flex items-center gap-2">
-            <span className="font-semibold text-slate-300">ShareHub</span>
-            <span>· P2P Community Rental & Fractional Marketplace</span>
-          </div>
-          <div className="flex items-center gap-6">
-            <span className="hover:text-slate-400 cursor-pointer">Neighborhood Charter</span>
-            <span className="hover:text-slate-400 cursor-pointer">Dispute Escrow</span>
-            <span className="hover:text-slate-400 cursor-pointer">Drizzle Schema Docs</span>
-          </div>
+        <div className="pt-8 flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-slate-500">
+          <span>
+            <span className="font-semibold text-slate-300">ShareHub</span> · Borrow more, buy less
+          </span>
+          <span>© {new Date().getFullYear()} ShareHub</span>
         </div>
       </div>
     </footer>

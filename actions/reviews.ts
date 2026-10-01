@@ -15,7 +15,8 @@ import { validateInput, SubmitReviewSchema } from '../lib/validations';
 export interface CreateReviewInput {
   bookingId: string;
   reviewerId?: string;
-  targetId: string;
+  /** Ignored: a review always goes to the booked listing's host. */
+  targetId?: string;
   listingId?: string;
   rating: number; // 1-5
   comment: string;
@@ -49,8 +50,7 @@ export async function createReview(
 
   const {
     bookingId,
-    reviewerId = 'usr_me',
-    targetId,
+    reviewerId,
     listingId,
     rating,
     comment,
@@ -59,7 +59,20 @@ export async function createReview(
     accuracyRating = 5,
   } = { ...input, ...validated };
 
-  return await db.transaction(async (tx: any) => {
+  return await db.transaction(async () => {
+    // Only the renter of a finished booking can review its host, once.
+    const booking = memoryStore.bookings.get(bookingId);
+    const bookedListing = booking ? memoryStore.listings.get(booking.listingId) : undefined;
+    if (!booking || !bookedListing || !reviewerId || booking.renterId !== reviewerId) {
+      throw new Error("We couldn't find that booking on your account.");
+    }
+    if (booking.status !== 'COMPLETED') throw new Error('You can leave a review once the rental is finished.');
+    const alreadyReviewed = Array.from(memoryStore.reviews.values()).some(
+      (r) => r.bookingId === bookingId && r.reviewerId === reviewerId
+    );
+    if (alreadyReviewed) throw new Error("You've already reviewed this rental.");
+    const targetId = bookedListing.ownerId;
+
     const reviewId = `rev_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
     const now = new Date();
 
@@ -68,7 +81,7 @@ export async function createReview(
       bookingId,
       reviewerId,
       targetId,
-      listingId: listingId || null,
+      listingId: listingId || bookedListing.id,
       rating: Math.round(rating),
       comment: comment.trim(),
       cleanlinessRating: cleanlinessRating || 5,
@@ -117,7 +130,7 @@ export async function createReview(
         targetId,
         targetUserName: targetUser?.name || 'User',
         reviewerId,
-        reviewerName: reviewer?.name || 'Alex Rivera',
+        reviewerName: reviewer?.name,
         rating,
         cleanlinessRating,
         communicationRating,
@@ -136,10 +149,10 @@ export async function createReview(
         id: newReview.id,
         bookingId: newReview.bookingId,
         reviewerId: newReview.reviewerId,
-        reviewerName: reviewer?.name || 'Alex Rivera',
+        reviewerName: reviewer?.name || 'ShareHub member',
         reviewerImage: reviewer?.image || '',
         targetId: newReview.targetId,
-        targetName: targetUser?.name || 'Marcus Thorne',
+        targetName: targetUser?.name || 'your host',
         listingId: newReview.listingId,
         listingTitle: listing?.title || 'Shared Community Asset',
         rating: newReview.rating,

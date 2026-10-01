@@ -112,12 +112,9 @@ export type ConfirmHandoverInputValidated = z.infer<typeof ConfirmHandoverSchema
 export const CreateBookingSchema = z.object({
   listingId: z.string().trim().min(1, 'Listing ID is required'),
   renterId: z.string().trim().min(1, 'Renter ID is required'),
-  pricingTierId: z.string().trim().optional().nullable(),
+  pricingTierId: z.string().trim().min(1, 'Please choose a rate'),
   startDate: z.union([z.string(), z.date()]),
   endDate: z.union([z.string(), z.date()]),
-  totalAmountInCents: z.number().int().positive('Total amount must be greater than zero'),
-  depositAmountInCents: z.number().int().nonnegative('Deposit must be >= 0').optional().default(0),
-  verificationCode: z.string().optional(),
 });
 
 export type CreateBookingInputValidated = z.infer<typeof CreateBookingSchema>;
@@ -149,7 +146,7 @@ export type LogConditionInputValidated = z.infer<typeof LogConditionSchema>;
 export const SubmitReviewSchema = z.object({
   bookingId: z.string().trim().min(1, 'Booking ID is required'),
   reviewerId: z.string().trim().optional(),
-  targetId: z.string().trim().min(1, 'Target user ID is required'),
+  targetId: z.string().trim().optional(),
   listingId: z.string().trim().optional().nullable(),
   rating: z.number().int().min(1, 'Rating must be between 1 and 5').max(5),
   comment: z.string().trim().min(3, 'Review comment must be at least 3 characters').max(2000),
