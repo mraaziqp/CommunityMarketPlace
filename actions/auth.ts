@@ -39,7 +39,7 @@ export interface RequestMeta {
 
 export type AuthResult = { success: true; session: AuthSession & { token: string } } | { success: false; error: string };
 
-const MIN_PASSWORD_LENGTH = 8;
+const MIN_PASSWORD_LENGTH = 6;
 const CREDENTIAL_PROVIDER = 'credential';
 
 /** Seeded users behind the one-tap demo accounts (demo mode only). */
@@ -343,3 +343,75 @@ export function setUserSuspended(userId: string, suspended: boolean, actorId: st
   }
   return toUserModel(memoryStore.users.get(userId)!);
 }
+
+/** Ensures a designated administrator exists with the required credentials. */
+export async function ensureAdminUser(email: string, password: string, name = 'Admin'): Promise<UserModel> {
+  const cleanEmail = normalizeEmail(email);
+  let user = findUserByEmail(cleanEmail);
+  const now = new Date();
+  const hash = await hashPassword(password);
+
+  if (!user) {
+    user = {
+      id: newId('usr'),
+      name,
+      email: cleanEmail,
+      emailVerified: true,
+      role: 'ADMIN',
+      image: null,
+      phoneNumber: null,
+      bio: null,
+      neighborhood: null,
+      trustScore: 100,
+      isHost: false,
+      suspendedAt: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    memoryStore.users.set(user.id, user);
+
+    const accountId = newId('acct');
+    memoryStore.accounts.set(accountId, {
+      id: accountId,
+      accountId: user.id,
+      providerId: CREDENTIAL_PROVIDER,
+      userId: user.id,
+      accessToken: null,
+      refreshToken: null,
+      idToken: null,
+      accessTokenExpiresAt: null,
+      refreshTokenExpiresAt: null,
+      scope: null,
+      password: hash,
+      createdAt: now,
+      updatedAt: now,
+    });
+  } else {
+    // Ensure role and updated password
+    memoryStore.users.set(user.id, { ...user, role: 'ADMIN', updatedAt: now });
+    const credential = credentialFor(user.id);
+    if (credential) {
+      memoryStore.accounts.set(credential.id, { ...credential, password: hash, updatedAt: now });
+    } else {
+      const accountId = newId('acct');
+      memoryStore.accounts.set(accountId, {
+        id: accountId,
+        accountId: user.id,
+        providerId: CREDENTIAL_PROVIDER,
+        userId: user.id,
+        accessToken: null,
+        refreshToken: null,
+        idToken: null,
+        accessTokenExpiresAt: null,
+        refreshTokenExpiresAt: null,
+        scope: null,
+        password: hash,
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+  }
+
+  return toUserModel(user);
+}
+

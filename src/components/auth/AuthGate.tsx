@@ -40,8 +40,8 @@ export const AuthGate: React.FC<AuthGateProps> = ({ onAuthSuccess }) => {
     e.preventDefault();
     const cleanEmail = email.trim().toLowerCase();
     const cleanName = name.trim();
-    if (mode === 'signup' && password.length < 8) {
-      setErrorMsg('Password must be at least 8 characters long.');
+    if (mode === 'signup' && password.length < 6) {
+      setErrorMsg('Password must be at least 6 characters long.');
       return;
     }
     setIsLoading(true);
@@ -245,10 +245,10 @@ export const AuthGate: React.FC<AuthGateProps> = ({ onAuthSuccess }) => {
                   type="password"
                   required
                   autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
-                  minLength={mode === 'signup' ? 8 : undefined}
+                  minLength={mode === 'signup' ? 6 : undefined}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  placeholder={mode === 'signup' ? 'At least 8 characters' : '••••••••'}
+                  placeholder={mode === 'signup' ? 'At least 6 characters' : '••••••••'}
                   className={inputClass}
                 />
               </div>

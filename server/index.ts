@@ -6,7 +6,7 @@ import { createApp } from './app';
 import { publishCommittedEvents } from './events';
 import { sendCommittedNotifications } from './notifications';
 import { expireStaleHolds } from '../actions/payments';
-import { pruneExpiredSessions } from '../actions/auth';
+import { ensureAdminUser, pruneExpiredSessions } from '../actions/auth';
 import { scheduleNightlyBackups } from './firebase';
 
 async function main() {
@@ -19,6 +19,11 @@ async function main() {
     publishCommittedEvents(writes);
     sendCommittedNotifications(writes);
   };
+
+  // Ensure the designated administrator account is initialized
+  await memoryStore.runExclusive(async () => {
+    await ensureAdminUser('mraaziqp@gmail.com', '114477', 'Mraaziq');
+  });
 
   if (cfg.demoMode && memoryStore.isEmpty()) {
     await memoryStore.runExclusive(() => memoryStore.seedDemoData({ includeAdmin: true }));
