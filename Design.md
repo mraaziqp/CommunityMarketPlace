@@ -1,6 +1,20 @@
 # System Architecture & Design Documentation
 ## P2P Community Rental & Fractional Usage Marketplace
 
+> **Status: target architecture, not the shipped one.**
+>
+> This document describes the server-backed design the domain model was written
+> against — Next.js 15 App Router, Neon PostgreSQL with PostGIS, Better Auth,
+> Server Actions.
+>
+> What actually ships is a React 19 + Vite single-page app deployed as static
+> files, with its data held in the browser and persisted to `localStorage`. The
+> domain model, the schema in `db/schema.ts` and the function boundaries in
+> `actions/` all follow this document; the transport underneath them does not.
+>
+> See [README.md](./README.md) for the architecture as built, and the
+> "Making it multi-user" section there for the path from one to the other.
+
 ### 1. Project Overview & Vision
 The **Community P2P Rental & Fractional Sharing Marketplace** is a trust-first platform that enables neighborhood and community members to share high-value resources. It bridges three core asset classes:
 1. **Time-Based Accommodation (Rooms & Spaces)**: Traditional nightly or weekly stays.

@@ -1,645 +1,454 @@
-import React, { useState, useRef } from 'react';
-import {
-  X,
-  Plus,
-  Trash2,
-  Sparkles,
-  Zap,
-  BedDouble,
-  Wrench,
-  CheckCircle2,
-  AlertCircle,
-  UploadCloud,
-  Image as ImageIcon,
-  Loader2,
-  Lock,
-  ShieldCheck,
-  Users,
-  Camera,
-} from 'lucide-react';
-import { ListingCategory, ListingModel, PricingType } from '../../types';
-import { getSignedUploadUrl, registerUploadedListingPhoto } from '../../../actions/storage';
-import { createListing } from '../../../actions/listings';
+import React, { useRef, useState } from 'react';
+import { X, Plus, Trash2, Zap, BedDouble, Wrench, CheckCircle2, AlertCircle, UploadCloud, Loader2, Lock, Camera } from 'lucide-react';
+import { ListingCategory, ListingModel, PricingType, TrustGroupModel } from '../../types';
+import { prepareImage } from '../../lib/images';
+import { api } from '../../api/client';
 import { cn } from '../../lib/utils';
 
 export interface CreateListingModalProps {
+  /** Circles the host belongs to; a listing can be limited to one of them. */
+  circles: TrustGroupModel[];
   onClose: () => void;
-  onCreate: (listing: ListingModel) => void;
+  onCreate?: (listing: ListingModel) => void;
+  /** Edit mode: when supplied, the modal edits an existing listing instead of creating */
+  initial?: ListingModel | null;
+  onUpdate?: (listing: ListingModel) => void;
 }
 
-export const CreateListingModal: React.FC<CreateListingModalProps> = ({
-  onClose,
-  onCreate,
-}) => {
-  const [category, setCategory] = useState<ListingCategory>('fractional_appliance');
-  const [title, setTitle] = useState('');
-  const [description, setDescription] = useState('');
-  const [neighborhood, setNeighborhood] = useState('Observatory');
-  const [city, setCity] = useState('Cape Town');
-  const [address, setAddress] = useState('Unit 12, Courtyard Arcade');
-  const [images, setImages] = useState<string[]>([
-    'https://images.unsplash.com/photo-1626806787461-102c1bfaaea1?w=800',
-  ]);
-  const [customImageUrl, setCustomImageUrl] = useState('');
+const CATEGORIES: { id: ListingCategory; label: string; hint: string; icon: React.ReactNode }[] = [
+  { id: 'physical_item', label: 'Tools & gear', hint: 'Drills, saws, roof boxes, camping kit', icon: <Wrench className="w-3.5 h-3.5 text-indigo-400" /> },
+  { id: 'room', label: 'A space', hint: 'Studio, workshop, garage, spare room', icon: <BedDouble className="w-3.5 h-3.5 text-emerald-400" /> },
+  { id: 'fractional_appliance', label: 'Shared appliance', hint: 'Washer, 3D printer, solar battery', icon: <Zap className="w-3.5 h-3.5 text-amber-400" /> },
+];
+
+const RATE_OPTIONS: Record<ListingCategory, { type: PricingType; label: string }[]> = {
+  physical_item: [
+    { type: 'daily', label: 'per day' },
+    { type: 'hourly', label: 'per hour' },
+  ],
+  room: [
+    { type: 'hourly', label: 'per hour' },
+    { type: 'daily', label: 'per day' },
+    { type: 'nightly', label: 'per night' },
+  ],
+  fractional_appliance: [{ type: 'monthly_subscription', label: 'per month' }],
+};
+
+const DEFAULT_DEPOSIT_RANDS: Record<ListingCategory, number> = { physical_item: 500, room: 500, fractional_appliance: 200 };
+
+const fieldClass = 'w-full px-3.5 py-2.5 text-sm bg-slate-50 rounded-xl border border-slate-200 focus:bg-white focus:border-slate-400 outline-none';
+
+export const CreateListingModal: React.FC<CreateListingModalProps> = ({ circles, onClose, onCreate, initial, onUpdate }) => {
+  const isEdit = !!initial;
+  const initialTier = initial?.pricingTiers?.[0];
+
+  const [category, setCategory] = useState<ListingCategory>(initial?.category ?? 'physical_item');
+  const [title, setTitle] = useState(initial?.title ?? '');
+  const [description, setDescription] = useState(initial?.description ?? '');
+  const [address, setAddress] = useState(initial?.address ?? '');
+  const [neighborhood, setNeighborhood] = useState(initial?.neighborhood ?? '');
+  const [city, setCity] = useState(initial?.city ?? 'Cape Town');
+  const [images, setImages] = useState<string[]>(initial?.images ?? []);
+  const [imageUrl, setImageUrl] = useState('');
+  const [rateType, setRateType] = useState<PricingType>(initialTier?.type ?? 'daily');
+  const [price, setPrice] = useState(initialTier ? Math.round(initialTier.priceInCents / 100) : 150);
+  const [deposit, setDeposit] = useState(initial ? Math.round(initial.depositRequiredInCents / 100) : DEFAULT_DEPOSIT_RANDS.physical_item);
+  const [maxHouseholds, setMaxHouseholds] = useState(initial?.maxSubscribers ?? 4);
+  const [turnsPerMonth, setTurnsPerMonth] = useState(initialTier?.usageLimitPerPeriod ?? 10);
+  const [rules, setRules] = useState(initial?.rules ?? '');
+  const [circleId, setCircleId] = useState(initial?.visibilityGroupId ?? 'public');
   const [isUploading, setIsUploading] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
-  const [uploadError, setUploadError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
 
-  const [maxSubscribers, setMaxSubscribers] = useState(4);
-  const [tierName, setTierName] = useState('Co-Op Monthly (10 Uses)');
-  const [tierPrice, setTierPrice] = useState(450); // in Rands
-  const [tierType, setTierType] = useState<PricingType>('monthly_subscription');
-  const [usageLimit, setUsageLimit] = useState(10);
-  const [rules, setRules] = useState('Please wipe down after use. Keep door ajar.');
-  const [visibilityGroupId, setVisibilityGroupId] = useState<string>('public');
+  const chooseCategory = (next: ListingCategory) => {
+    setCategory(next);
+    setRateType(RATE_OPTIONS[next][0].type);
+    setDeposit(DEFAULT_DEPOSIT_RANDS[next]);
+    setPrice(next === 'fractional_appliance' ? 450 : 150);
+  };
 
-  // Handle direct-to-bucket pre-signed upload with physical HTTP PUT execution
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
-
-    const file = files[0];
+  const handleFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
     setIsUploading(true);
-    setUploadError(null);
-    setUploadProgress(15);
-
+    setError(null);
     try {
-      // 1. Request pre-signed URL from server action
-      const signedRes = await getSignedUploadUrl({
-        filename: file.name,
-        contentType: file.type || 'image/jpeg',
-        fileSizeBytes: file.size,
-      });
-
-      if (!signedRes.success) {
-        setUploadError(signedRes.error || 'Failed to acquire upload authorization.');
-        setIsUploading(false);
-        setUploadProgress(null);
-        return;
-      }
-
-      setUploadProgress(45);
-
-      // 2. Execute HTTP PUT request directly from client to storage bucket
-      let finalPhotoUrl = signedRes.publicUrl;
-      try {
-        const uploadResponse = await fetch(signedRes.uploadUrl, {
-          method: 'PUT',
-          headers: signedRes.headers || {
-            'Content-Type': file.type || 'image/jpeg',
-          },
-          body: file,
-        });
-
-        if (!uploadResponse.ok && uploadResponse.status !== 0) {
-          console.warn('Storage bucket PUT returned non-200, falling back to local object stream:', uploadResponse.status);
-          finalPhotoUrl = URL.createObjectURL(file);
-        }
-      } catch (putErr) {
-        console.warn('Direct bucket PUT completed or fallback mode:', putErr);
-        finalPhotoUrl = URL.createObjectURL(file);
-      }
-
-      setUploadProgress(85);
-
-      // 3. Register uploaded image in system audit log & state
-      await registerUploadedListingPhoto({
-        listingId: `list_temp_${Date.now()}`,
-        photoUrl: finalPhotoUrl,
-        key: signedRes.key,
-        userId: 'usr_me',
-      });
-
-      setImages((prev) => [...prev, finalPhotoUrl]);
-      setUploadProgress(100);
-      setTimeout(() => {
-        setIsUploading(false);
-        setUploadProgress(null);
-      }, 400);
-    } catch (err: any) {
-      setUploadError(err.message || 'Media upload failed.');
+      const result = await prepareImage(file);
+      if (result.success === true) setImages((prev) => [...prev, result.dataUrl]);
+      else setError(result.error);
+    } finally {
       setIsUploading(false);
-      setUploadProgress(null);
     }
   };
 
-  const handleAddUrl = () => {
-    if (customImageUrl.trim()) {
-      setImages((prev) => [...prev, customImageUrl.trim()]);
-      setCustomImageUrl('');
+  const addImageUrl = () => {
+    const url = imageUrl.trim();
+    if (!url) return;
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol !== 'https:') throw new Error();
+      setImages((prev) => [...prev, url]);
+      setImageUrl('');
+      setError(null);
+    } catch {
+      setError('Please paste a full image link starting with https://');
     }
   };
 
-  const handleRemoveImage = (index: number) => {
-    setImages((prev) => prev.filter((_, i) => i !== index));
-  };
-
-  // Wire actual Form Submission via Server Action createListing
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!title.trim() || !description.trim()) return;
-
+    setError(null);
+    if (price <= 0) {
+      setError('Please set a price.');
+      return;
+    }
     setIsSubmitting(true);
-    setUploadError(null);
-
-    const finalImages =
-      images.length > 0
-        ? images
-        : [
-            'https://images.unsplash.com/photo-1582735689369-4fe89db7114c?w=800',
-          ];
-
-    let groupName: string | undefined = undefined;
-    if (visibilityGroupId === 'grp_woodstock_coop') groupName = 'Woodstock Makers Co-Op';
-    if (visibilityGroupId === 'grp_obs_ecovillage') groupName = 'Observatory Eco-Village';
-    if (visibilityGroupId === 'grp_claremont_guild') groupName = 'Claremont Tool Guild';
-
+    const isCoop = category === 'fractional_appliance';
+    const rateLabel = RATE_OPTIONS[category].find((r) => r.type === rateType)?.label ?? '';
     try {
-      // Execute Neon PostgreSQL insert via Server Action
-      const result = await createListing({
-        title: title.trim(),
-        description: description.trim(),
-        category,
-        ownerId: 'usr_me',
-        address,
-        neighborhood,
-        city,
-        images: finalImages,
-        rules,
-        depositRequiredInCents: category === 'fractional_appliance' ? 20000 : 50000,
-        maxSubscribers: category === 'fractional_appliance' ? maxSubscribers : 1,
-        accessMethod: category === 'fractional_appliance' ? 'smart_plug' : 'pin_code',
-        visibilityGroupId: visibilityGroupId !== 'public' ? visibilityGroupId : null,
-        visibilityGroupName: visibilityGroupId !== 'public' ? groupName : undefined,
-        amenities: ['Community Verified', 'Maintenance Support', 'Zero-Queue Policy'],
-        pricingTiers: [
-          {
-            name: tierName,
-            type: tierType,
-            priceInCents: tierPrice * 100,
-            currency: 'ZAR',
-            usageLimitPerPeriod: tierType === 'monthly_subscription' ? usageLimit : null,
-            periodUnit: tierType === 'monthly_subscription' ? 'month' : 'day',
-            periodDuration: 1,
-            isActive: true,
-          },
-        ],
-      });
-
-      if (!result.success || !result.listing) {
-        setUploadError(result.error || 'Failed to save listing to database.');
-        setIsSubmitting(false);
-        return;
+      if (isEdit && initial) {
+        const updated = await api.updateListing(initial.id, {
+          title: title.trim(),
+          description: description.trim(),
+          address,
+          neighborhood,
+          city,
+          images,
+          rules: rules.trim() || null,
+          depositRequiredInCents: Math.max(0, Math.round(deposit * 100)),
+          maxSubscribers: isCoop ? maxHouseholds : 1,
+          visibilityGroupId: circleId !== 'public' ? circleId : null,
+          tiers: [
+            {
+              id: initial.pricingTiers?.[0]?.id,
+              name: isCoop ? `${turnsPerMonth} turns a month` : `Rate ${rateLabel}`,
+              type: rateType,
+              priceInCents: Math.round(price * 100),
+              usageLimitPerPeriod: isCoop ? turnsPerMonth : null,
+              isActive: true,
+            },
+          ],
+        });
+        onUpdate?.(updated);
+      } else {
+        const listing = await api.createListing({
+          title: title.trim(),
+          description: description.trim(),
+          category,
+          address,
+          neighborhood,
+          city,
+          images,
+          rules: rules.trim() || undefined,
+          depositRequiredInCents: Math.max(0, Math.round(deposit * 100)),
+          maxSubscribers: isCoop ? maxHouseholds : 1,
+          accessMethod: isCoop ? 'pin_code' : category === 'room' ? 'pin_code' : 'host_handover',
+          visibilityGroupId: circleId !== 'public' ? circleId : null,
+          pricingTiers: [
+            {
+              name: isCoop ? `${turnsPerMonth} turns a month` : `Rate ${rateLabel}`,
+              type: rateType,
+              priceInCents: Math.round(price * 100),
+              currency: 'ZAR',
+              usageLimitPerPeriod: isCoop ? turnsPerMonth : null,
+              periodUnit: isCoop ? 'month' : rateType === 'hourly' ? 'hour' : 'day',
+              periodDuration: 1,
+              isActive: true,
+            },
+          ],
+        });
+        onCreate?.(listing);
       }
-
-      onCreate(result.listing);
       onClose();
     } catch (err: any) {
-      console.error('Error submitting listing:', err);
-      setUploadError(err.message || 'An error occurred while creating the listing.');
+      setError(err?.message || 'We could not save your listing. Please try again.');
+    } finally {
       setIsSubmitting(false);
     }
   };
 
+  const isCoop = category === 'fractional_appliance';
+
   return (
     <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-3 sm:p-6 animate-in fade-in duration-200">
-      <div className="relative w-full max-w-xl bg-white rounded-2xl sm:rounded-3xl shadow-2xl border border-slate-200/90 overflow-hidden flex flex-col max-h-[calc(100dvh-2rem)]">
-        {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 bg-slate-900 text-white">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="create-title"
+        className="relative w-full max-w-xl bg-white rounded-2xl sm:rounded-3xl shadow-2xl border border-slate-200/90 overflow-hidden flex flex-col max-h-[calc(100dvh-2rem)]"
+      >
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
           <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-xl bg-slate-800 flex items-center justify-center text-white border border-slate-700">
+            <div className="w-8 h-8 rounded-xl bg-slate-900 flex items-center justify-center text-white">
               <Plus className="w-4 h-4" />
             </div>
             <div>
-              <h2 className="text-sm font-bold text-white">Create Co-Op Listing</h2>
-              <p className="text-[11px] text-slate-400">
-                Post an appliance co-op, studio space, or heavy equipment
+              <h2 id="create-title" className="text-sm font-bold text-slate-900">
+                {isEdit ? 'Edit listing' : 'Share something'}
+              </h2>
+              <p className="text-[11px] text-slate-500">
+                {isEdit ? 'Update details, rates or availability' : 'Earn from the things you already own'}
               </p>
             </div>
           </div>
-
-          <button
-            type="button"
-            onClick={onClose}
-            className="p-1.5 rounded-full text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
-          >
+          <button type="button" aria-label="Close" onClick={onClose} className="p-1.5 rounded-full text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors">
             <X className="w-4 h-4" />
           </button>
         </div>
 
-        {/* Form Body */}
         <form onSubmit={handleSubmit} className="p-6 space-y-5 overflow-y-auto">
-          {/* Category Picker */}
-          <div>
-            <label className="text-xs font-semibold text-slate-800 block mb-1.5">
-              Select Asset Archetype *
-            </label>
-            <div className="grid grid-cols-3 gap-2">
-              <button
-                type="button"
-                onClick={() => setCategory('fractional_appliance')}
-                className={cn(
-                  'p-3 rounded-xl border text-left flex flex-col gap-1 transition-all cursor-pointer',
-                  category === 'fractional_appliance'
-                    ? 'bg-slate-900 text-white border-slate-900 shadow-xs'
-                    : 'bg-white border-slate-200 hover:border-slate-300'
-                )}
-              >
-                <div
-                  className={cn(
-                    'flex items-center gap-1.5 font-bold text-xs',
-                    category === 'fractional_appliance' ? 'text-white' : 'text-slate-900'
-                  )}
-                >
-                  <Zap className="w-3.5 h-3.5 text-amber-400" />
-                  Fractional Appliance
-                </div>
-                <span
-                  className={cn(
-                    'text-[10px]',
-                    category === 'fractional_appliance' ? 'text-slate-300' : 'text-slate-500'
-                  )}
-                >
-                  Shared washing machine, solar station, 3D printer
-                </span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setCategory('room')}
-                className={cn(
-                  'p-3 rounded-xl border text-left flex flex-col gap-1 transition-all cursor-pointer',
-                  category === 'room'
-                    ? 'bg-slate-900 text-white border-slate-900 shadow-xs'
-                    : 'bg-white border-slate-200 hover:border-slate-300'
-                )}
-              >
-                <div
-                  className={cn(
-                    'flex items-center gap-1.5 font-bold text-xs',
-                    category === 'room' ? 'text-white' : 'text-slate-900'
-                  )}
-                >
-                  <BedDouble className="w-3.5 h-3.5 text-emerald-400" />
-                  Space & Studio
-                </div>
-                <span
-                  className={cn(
-                    'text-[10px]',
-                    category === 'room' ? 'text-slate-300' : 'text-slate-500'
-                  )}
-                >
-                  Podcast studio, darkroom, garage bay
-                </span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setCategory('physical_item')}
-                className={cn(
-                  'p-3 rounded-xl border text-left flex flex-col gap-1 transition-all cursor-pointer',
-                  category === 'physical_item'
-                    ? 'bg-slate-900 text-white border-slate-900 shadow-xs'
-                    : 'bg-white border-slate-200 hover:border-slate-300'
-                )}
-              >
-                <div
-                  className={cn(
-                    'flex items-center gap-1.5 font-bold text-xs',
-                    category === 'physical_item' ? 'text-white' : 'text-slate-900'
-                  )}
-                >
-                  <Wrench className="w-3.5 h-3.5 text-indigo-400" />
-                  Equipment & Tools
-                </div>
-                <span
-                  className={cn(
-                    'text-[10px]',
-                    category === 'physical_item' ? 'text-slate-300' : 'text-slate-500'
-                  )}
-                >
-                  Power drills, bike racks, saws
-                </span>
-              </button>
+          {error && (
+            <div role="alert" className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+              <span>{error}</span>
             </div>
-          </div>
+          )}
 
-          {/* Title & Description */}
-          <div className="space-y-3">
-            <div>
-              <label className="text-xs font-semibold text-slate-800 block mb-1">
-                Listing Title *
-              </label>
-              <input
-                type="text"
-                required
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                placeholder="e.g. Miele TwinDos Eco Washer Co-Op (Unit 3A)"
-                className="w-full px-3.5 py-2 text-xs bg-slate-50 rounded-xl border border-slate-200 focus:bg-white focus:border-slate-400 outline-none"
-              />
+          <fieldset>
+            <legend className="text-xs font-semibold text-slate-800 mb-1.5">What are you sharing?</legend>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+              {CATEGORIES.map((c) => (
+                <button
+                  key={c.id}
+                  type="button"
+                  aria-pressed={category === c.id}
+                  onClick={() => chooseCategory(c.id)}
+                  className={cn(
+                    'p-3 rounded-xl border text-left flex flex-col gap-1 transition-all cursor-pointer',
+                    category === c.id ? 'bg-slate-900 text-white border-slate-900 shadow-xs' : 'bg-white border-slate-200 hover:border-slate-300'
+                  )}
+                >
+                  <span className={cn('flex items-center gap-1.5 font-bold text-xs', category === c.id ? 'text-white' : 'text-slate-900')}>
+                    {c.icon}
+                    {c.label}
+                  </span>
+                  <span className={cn('text-[10px]', category === c.id ? 'text-slate-300' : 'text-slate-500')}>{c.hint}</span>
+                </button>
+              ))}
             </div>
+          </fieldset>
 
-            <div>
-              <label className="text-xs font-semibold text-slate-800 block mb-1">
-                Description & Specifications *
-              </label>
-              <textarea
-                required
-                rows={3}
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-                placeholder="Explain the asset condition, maintenance schedule, location within the building..."
-                className="w-full px-3.5 py-2 text-xs bg-slate-50 rounded-xl border border-slate-200 focus:bg-white focus:border-slate-400 outline-none"
-              />
-            </div>
-          </div>
+          <label className="block">
+            <span className="text-xs font-semibold text-slate-800 block mb-1">Title</span>
+            <input
+              type="text"
+              required
+              minLength={3}
+              maxLength={120}
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              placeholder={isCoop ? 'e.g. Shared washing machine, Block C laundry' : category === 'room' ? 'e.g. Sunny podcast studio' : 'e.g. Bosch hammer drill with bits'}
+              className={fieldClass}
+            />
+          </label>
 
-          {/* MEDIA STORAGE & PHOTO UPLOADS (Pre-Signed URL Pipeline) */}
+          <label className="block">
+            <span className="text-xs font-semibold text-slate-800 block mb-1">Description</span>
+            <textarea
+              required
+              minLength={10}
+              rows={3}
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              placeholder="What's included, what condition it's in, and anything a borrower should know."
+              className={fieldClass}
+            />
+          </label>
+
           <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-3">
-            <div className="flex items-center justify-between">
-              <div>
-                <span className="text-xs font-bold text-slate-900 uppercase tracking-wider block">
-                  Media Storage Pipeline
-                </span>
-                <span className="text-[11px] text-slate-500">
-                  Pre-Signed Direct Bucket Upload • High Resolution
-                </span>
-              </div>
-              <span className="text-[10px] px-2 py-0.5 rounded-md bg-indigo-100 text-indigo-800 font-mono font-semibold">
-                S3 / GCS Direct
-              </span>
-            </div>
-
-            {uploadError && (
-              <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center gap-2">
-                <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
-                <span>{uploadError}</span>
-              </div>
-            )}
-
-            {/* Direct Upload Dropzone */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-              <div
+            <span className="text-xs font-bold text-slate-900 block">Photos</span>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
                 onClick={() => fileInputRef.current?.click()}
-                className="border-2 border-dashed border-slate-300 hover:border-slate-400 rounded-xl p-3.5 text-center bg-white cursor-pointer transition-colors"
+                className="border-2 border-dashed border-slate-300 hover:border-slate-400 rounded-xl p-3.5 text-center bg-white cursor-pointer transition-colors flex flex-col items-center gap-1"
               >
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept="image/jpeg,image/png,image/webp,image/avif"
-                  onChange={handleFileUpload}
-                  className="hidden"
-                />
-                <div className="flex flex-col items-center justify-center gap-1">
-                  <div className="w-7 h-7 rounded-full bg-indigo-50 flex items-center justify-center text-indigo-600">
-                    {isUploading ? (
-                      <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-600" />
-                    ) : (
-                      <UploadCloud className="w-3.5 h-3.5" />
-                    )}
-                  </div>
-                  <div className="text-[11px] font-bold text-slate-800">
-                    {isUploading ? `Uploading (${uploadProgress}%)...` : 'Upload Image File'}
-                  </div>
-                  <div className="text-[9px] text-slate-400">
-                    Supports JPEG, PNG, WebP
-                  </div>
-                </div>
-              </div>
-
-              <div
+                {isUploading ? <Loader2 className="w-4 h-4 animate-spin text-indigo-600" /> : <UploadCloud className="w-4 h-4 text-indigo-600" />}
+                <span className="text-[11px] font-bold text-slate-800">{isUploading ? 'Adding…' : 'Upload a photo'}</span>
+              </button>
+              <button
+                type="button"
                 onClick={() => cameraInputRef.current?.click()}
-                className="border-2 border-dashed border-slate-300 hover:border-slate-400 rounded-xl p-3.5 text-center bg-white cursor-pointer transition-colors"
+                className="border-2 border-dashed border-slate-300 hover:border-slate-400 rounded-xl p-3.5 text-center bg-white cursor-pointer transition-colors flex flex-col items-center gap-1"
               >
-                <input
-                  ref={cameraInputRef}
-                  type="file"
-                  accept="image/*"
-                  capture="environment"
-                  onChange={handleFileUpload}
-                  className="hidden"
-                />
-                <div className="flex flex-col items-center justify-center gap-1">
-                  <div className="w-7 h-7 rounded-full bg-emerald-50 flex items-center justify-center text-emerald-600">
-                    <Camera className="w-3.5 h-3.5" />
-                  </div>
-                  <div className="text-[11px] font-bold text-slate-800">
-                    Take Photo
-                  </div>
-                  <div className="text-[9px] text-slate-400">
-                    Physical Camera Capture
-                  </div>
-                </div>
-              </div>
+                <Camera className="w-4 h-4 text-emerald-600" />
+                <span className="text-[11px] font-bold text-slate-800">Take a photo</span>
+              </button>
+              <input ref={fileInputRef} type="file" accept="image/jpeg,image/png,image/webp,image/avif" onChange={handleFile} className="hidden" />
+              <input ref={cameraInputRef} type="file" accept="image/*" capture="environment" onChange={handleFile} className="hidden" />
             </div>
 
-            {/* URL Input Fallback */}
             <div className="flex gap-2">
               <input
                 type="url"
-                value={customImageUrl}
-                onChange={(e) => setCustomImageUrl(e.target.value)}
-                placeholder="Or paste an image CDN URL..."
-                className="flex-1 px-3 py-1.5 text-xs bg-white rounded-xl border border-slate-200 outline-none"
+                value={imageUrl}
+                onChange={(e) => setImageUrl(e.target.value)}
+                placeholder="…or paste an image link"
+                aria-label="Image link"
+                className="flex-1 min-w-0 px-3 py-1.5 text-xs bg-white rounded-xl border border-slate-200 outline-none"
               />
-              <button
-                type="button"
-                onClick={handleAddUrl}
-                className="px-3 py-1.5 text-xs font-bold text-slate-800 bg-slate-200 hover:bg-slate-300 rounded-xl transition-colors cursor-pointer"
-              >
-                Add URL
+              <button type="button" onClick={addImageUrl} className="px-3 py-1.5 text-xs font-bold text-slate-800 bg-slate-200 hover:bg-slate-300 rounded-xl transition-colors cursor-pointer">
+                Add
               </button>
             </div>
 
-            {/* Image Gallery Previews */}
-            {images.length > 0 && (
+            {images.length > 0 ? (
               <div className="grid grid-cols-4 gap-2 pt-1">
                 {images.map((img, idx) => (
-                  <div
-                    key={idx}
-                    className="relative group rounded-xl overflow-hidden aspect-video border border-slate-200 bg-slate-100"
-                  >
-                    <img
-                      src={img}
-                      alt={`Preview ${idx + 1}`}
-                      referrerPolicy="no-referrer"
-                      className="w-full h-full object-cover"
-                    />
+                  <div key={idx} className="relative rounded-xl overflow-hidden aspect-video border border-slate-200 bg-slate-100">
+                    <img src={img} alt={`Photo ${idx + 1}`} referrerPolicy="no-referrer" className="w-full h-full object-cover" />
                     <button
                       type="button"
-                      onClick={() => handleRemoveImage(idx)}
-                      className="absolute top-1 right-1 p-1 rounded-md bg-black/70 hover:bg-rose-600 text-white opacity-0 group-hover:opacity-100 transition-all cursor-pointer"
+                      aria-label={`Remove photo ${idx + 1}`}
+                      onClick={() => setImages((prev) => prev.filter((_, i) => i !== idx))}
+                      className="absolute top-1 right-1 p-1 rounded-md bg-black/70 hover:bg-rose-600 text-white transition-all cursor-pointer"
                     >
                       <Trash2 className="w-3 h-3" />
                     </button>
                   </div>
                 ))}
               </div>
+            ) : (
+              <p className="text-[11px] text-slate-500">Listings with clear photos get booked far more often.</p>
             )}
           </div>
 
-          {/* Location */}
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="text-xs font-semibold text-slate-800 block mb-1">
-                Neighborhood / Suburb
+          <div className="space-y-3">
+            <label className="block">
+              <span className="text-xs font-semibold text-slate-800 block mb-1">
+                Street address <span className="font-normal text-slate-400">(only shared once someone books)</span>
+              </span>
+              <input type="text" required autoComplete="street-address" value={address} onChange={(e) => setAddress(e.target.value)} placeholder="12 Main Road" className={fieldClass} />
+            </label>
+            <div className="grid grid-cols-2 gap-3">
+              <label className="block">
+                <span className="text-xs font-semibold text-slate-800 block mb-1">Neighbourhood</span>
+                <input type="text" required value={neighborhood} onChange={(e) => setNeighborhood(e.target.value)} placeholder="Observatory" className={fieldClass} />
               </label>
-              <input
-                type="text"
-                value={neighborhood}
-                onChange={(e) => setNeighborhood(e.target.value)}
-                placeholder="e.g. Observatory"
-                className="w-full px-3.5 py-2 text-xs bg-slate-50 rounded-xl border border-slate-200 outline-none"
-              />
-            </div>
-            <div>
-              <label className="text-xs font-semibold text-slate-800 block mb-1">
-                City
+              <label className="block">
+                <span className="text-xs font-semibold text-slate-800 block mb-1">City</span>
+                <input type="text" required value={city} onChange={(e) => setCity(e.target.value)} className={fieldClass} />
               </label>
-              <input
-                type="text"
-                value={city}
-                onChange={(e) => setCity(e.target.value)}
-                placeholder="e.g. Cape Town"
-                className="w-full px-3.5 py-2 text-xs bg-slate-50 rounded-xl border border-slate-200 outline-none"
-              />
             </div>
           </div>
 
-          {/* Fractional Controls */}
-          {category === 'fractional_appliance' && (
-            <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-3">
-              <span className="text-xs font-bold text-slate-900 uppercase tracking-wider block">
-                Fractional Co-Op Controls
-              </span>
+          <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-3">
+            <span className="text-xs font-bold text-slate-900 block">Pricing</span>
+            <div className="grid grid-cols-2 gap-3">
+              <label className="block">
+                <span className="text-[11px] font-semibold text-slate-700 block mb-1">Price</span>
+                <span className="relative block">
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs font-bold text-slate-400">R</span>
+                  <input
+                    type="number"
+                    min={1}
+                    value={price}
+                    onChange={(e) => setPrice(Number(e.target.value))}
+                    className="w-full pl-7 pr-3 py-2 text-sm bg-white rounded-xl border border-slate-200 outline-none font-semibold"
+                  />
+                </span>
+              </label>
+              <label className="block">
+                <span className="text-[11px] font-semibold text-slate-700 block mb-1">Charged</span>
+                <select
+                  value={rateType}
+                  onChange={(e) => setRateType(e.target.value as PricingType)}
+                  disabled={RATE_OPTIONS[category].length === 1}
+                  className="w-full px-3 py-2 text-sm bg-white rounded-xl border border-slate-200 outline-none cursor-pointer disabled:cursor-default"
+                >
+                  {RATE_OPTIONS[category].map((r) => (
+                    <option key={r.type} value={r.type}>
+                      {r.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
 
+            {isCoop && (
               <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="text-[11px] font-semibold text-slate-800 block mb-1">
-                    Subscriber Cap (Max Users)
-                  </label>
+                <label className="block">
+                  <span className="text-[11px] font-semibold text-slate-700 block mb-1">Households sharing</span>
                   <input
                     type="number"
                     min={2}
                     max={10}
-                    value={maxSubscribers}
-                    onChange={(e) => setMaxSubscribers(Number(e.target.value))}
-                    className="w-full px-3 py-1.5 text-xs bg-white rounded-xl border border-slate-200 outline-none"
+                    value={maxHouseholds}
+                    onChange={(e) => setMaxHouseholds(Math.min(10, Math.max(2, Number(e.target.value) || 2)))}
+                    className="w-full px-3 py-2 text-sm bg-white rounded-xl border border-slate-200 outline-none"
                   />
-                  <span className="text-[10px] text-slate-500">
-                    Recommended: 3 to 4 users for zero waiting.
-                  </span>
-                </div>
-
-                <div>
-                  <label className="text-[11px] font-semibold text-slate-800 block mb-1">
-                    Usage Cycles / User / Month
-                  </label>
+                  <span className="text-[10px] text-slate-500">3–4 keeps waits short</span>
+                </label>
+                <label className="block">
+                  <span className="text-[11px] font-semibold text-slate-700 block mb-1">Turns each per month</span>
                   <input
                     type="number"
                     min={1}
-                    max={50}
-                    value={usageLimit}
-                    onChange={(e) => setUsageLimit(Number(e.target.value))}
-                    className="w-full px-3 py-1.5 text-xs bg-white rounded-xl border border-slate-200 outline-none"
+                    max={60}
+                    value={turnsPerMonth}
+                    onChange={(e) => setTurnsPerMonth(Math.min(60, Math.max(1, Number(e.target.value) || 1)))}
+                    className="w-full px-3 py-2 text-sm bg-white rounded-xl border border-slate-200 outline-none"
                   />
-                  <span className="text-[10px] text-slate-500">
-                    e.g. 10 uses per household monthly
-                  </span>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Trust Group Visibility */}
-          <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-2.5">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-bold text-slate-900 uppercase tracking-wider flex items-center gap-1.5">
-                <Lock className="w-3.5 h-3.5 text-indigo-600" />
-                Trust Group & Privacy Scope
-              </span>
-              <span className="text-[10px] px-2 py-0.5 rounded-md bg-emerald-100 text-emerald-800 font-semibold">
-                Access Control
-              </span>
-            </div>
-            <p className="text-[11px] text-slate-500">
-              Control who can discover and rent this asset. Restrict high-value items to verified members.
-            </p>
-            <select
-              value={visibilityGroupId}
-              onChange={(e) => setVisibilityGroupId(e.target.value)}
-              className="w-full px-3 py-2 text-xs bg-white rounded-xl border border-slate-200 outline-none font-medium text-slate-800 cursor-pointer"
-            >
-              <option value="public">🌐 Public Marketplace (Open to all Cape Town users)</option>
-              <option value="grp_woodstock_coop">🔒 Woodstock Makers Co-Op (Members Only)</option>
-              <option value="grp_obs_ecovillage">🔒 Observatory Eco-Village (Members Only)</option>
-              <option value="grp_claremont_guild">🔒 Claremont Tool Guild (Members Only)</option>
-            </select>
-          </div>
-
-          {/* Pricing Tier Setup */}
-          <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-3">
-            <span className="text-xs font-bold text-slate-900 uppercase tracking-wider block">
-              Pricing Tier
-            </span>
-
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="text-[11px] font-semibold text-slate-700 block mb-1">
-                  Tier Label
                 </label>
+              </div>
+            )}
+
+            <label className="block">
+              <span className="text-[11px] font-semibold text-slate-700 block mb-1">Refundable deposit</span>
+              <span className="relative block">
+                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs font-bold text-slate-400">R</span>
                 <input
-                  type="text"
-                  value={tierName}
-                  onChange={(e) => setTierName(e.target.value)}
-                  className="w-full px-3 py-1.5 text-xs bg-white rounded-xl border border-slate-200 outline-none"
+                  type="number"
+                  min={0}
+                  value={deposit}
+                  onChange={(e) => setDeposit(Math.max(0, Number(e.target.value) || 0))}
+                  className="w-full pl-7 pr-3 py-2 text-sm bg-white rounded-xl border border-slate-200 outline-none"
                 />
-              </div>
-
-              <div>
-                <label className="text-[11px] font-semibold text-slate-700 block mb-1">
-                  Price (Rands / Month)
-                </label>
-                <div className="relative">
-                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs font-bold text-slate-400">
-                    R
-                  </span>
-                  <input
-                    type="number"
-                    min={10}
-                    value={tierPrice}
-                    onChange={(e) => setTierPrice(Number(e.target.value))}
-                    className="w-full pl-7 pr-3 py-1.5 text-xs bg-white rounded-xl border border-slate-200 outline-none font-semibold"
-                  />
-                </div>
-              </div>
-            </div>
+              </span>
+            </label>
           </div>
 
-          {/* Submit Action */}
-          <div className="pt-2">
-            <button
-              type="submit"
-              disabled={isSubmitting || isUploading}
-              className="w-full py-3 px-4 rounded-xl font-bold text-xs text-white bg-slate-900 hover:bg-slate-800 disabled:opacity-60 disabled:cursor-not-allowed shadow-xs transition-all flex items-center justify-center gap-2 cursor-pointer"
+          <label className="block">
+            <span className="text-xs font-semibold text-slate-800 block mb-1">
+              House rules <span className="font-normal text-slate-400">(optional)</span>
+            </span>
+            <input type="text" value={rules} onChange={(e) => setRules(e.target.value)} placeholder="e.g. Please return it clean and charged." className={fieldClass} />
+          </label>
+
+          <label className="block p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-2">
+            <span className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
+              <Lock className="w-3.5 h-3.5 text-indigo-600" />
+              Who can see this?
+            </span>
+            <select
+              value={circleId}
+              onChange={(e) => setCircleId(e.target.value)}
+              className="w-full px-3 py-2 text-sm bg-white rounded-xl border border-slate-200 outline-none font-medium text-slate-800 cursor-pointer"
             >
-              {isSubmitting ? (
-                <>
-                  <Loader2 className="w-4 h-4 animate-spin text-emerald-400" />
-                  <span>Publishing to Database...</span>
-                </>
-              ) : (
-                <>
-                  <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                  <span>Publish Listing to Community</span>
-                </>
-              )}
-            </button>
-          </div>
+              <option value="public">Everyone on ShareHub</option>
+              {circles.map((c) => (
+                <option key={c.id} value={c.id}>
+                  Only members of {c.name}
+                </option>
+              ))}
+            </select>
+            {circles.length === 0 && (
+              <span className="text-[11px] text-slate-500 block">Join or start a circle to share privately with people you know.</span>
+            )}
+          </label>
+
+          <button
+            type="submit"
+            disabled={isSubmitting || isUploading}
+            className="w-full py-3 px-4 rounded-xl font-bold text-sm text-white bg-slate-900 hover:bg-slate-800 disabled:opacity-60 disabled:cursor-not-allowed shadow-xs transition-all flex items-center justify-center gap-2 cursor-pointer"
+          >
+            {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4 text-emerald-400" />}
+            <span>{isSubmitting ? (isEdit ? 'Saving…' : 'Publishing…') : isEdit ? 'Save changes' : 'Publish listing'}</span>
+          </button>
         </form>
       </div>
     </div>

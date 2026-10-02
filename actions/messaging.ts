@@ -1,4 +1,3 @@
-'use server';
 
 import { db, memoryStore } from '../db';
 import {

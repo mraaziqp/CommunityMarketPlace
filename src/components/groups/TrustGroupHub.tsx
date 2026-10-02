@@ -18,21 +18,24 @@ import {
   X,
 } from 'lucide-react';
 import { TrustGroupModel } from '../../types';
-import { getTrustGroups, createTrustGroup, joinTrustGroup } from '../../../actions/groups';
+import { api } from '../../api/client';
 import { cn } from '../../lib/utils';
 
 interface TrustGroupHubProps {
-  currentUserId?: string;
+  currentUserId: string | null;
   onFilterByGroup?: (groupId: string | null, groupName?: string) => void;
   activeSelectedGroupId?: string | null;
-  onClose?: () => void;
+  onRequireSignIn: () => void;
+  /** Called after joining or starting a circle so the marketplace can show its listings. */
+  onMembershipChange?: () => void;
 }
 
 export function TrustGroupHub({
-  currentUserId = 'usr_me',
+  currentUserId,
   onFilterByGroup,
   activeSelectedGroupId = null,
-  onClose,
+  onRequireSignIn,
+  onMembershipChange,
 }: TrustGroupHubProps) {
   const [groups, setGroups] = useState<TrustGroupModel[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -52,7 +55,7 @@ export function TrustGroupHub({
   const fetchGroups = async () => {
     setIsLoading(true);
     try {
-      const data = await getTrustGroups(currentUserId);
+      const data = await api.circles();
       setGroups(data);
     } catch (err) {
       console.error('Failed to load trust groups', err);
@@ -73,23 +76,24 @@ export function TrustGroupHub({
 
   const handleJoin = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!inviteCodeInput.trim()) return;
+    if (!inviteCodeInput.trim() || !currentUserId) return;
 
     setIsActionPending(true);
     setStatusMessage(null);
     try {
-      const res = await joinTrustGroup(inviteCodeInput.trim(), currentUserId);
+      const res = { group: await api.joinCircle(inviteCodeInput.trim()) };
       setStatusMessage({
         type: 'success',
-        text: `Successfully joined "${res.group.name}"! You now have access to their private listings.`,
+        text: `Welcome to ${res.group.name}! You can now see what its members share.`,
       });
       setInviteCodeInput('');
       fetchGroups();
+      onMembershipChange?.();
       setTimeout(() => setShowJoinModal(false), 1500);
     } catch (err: any) {
       setStatusMessage({
         type: 'error',
-        text: err.message || 'Failed to join group with this invite code.',
+        text: err.message || "That code didn't work. Please check it with a member.",
       });
     } finally {
       setIsActionPending(false);
@@ -98,29 +102,27 @@ export function TrustGroupHub({
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newGroupName.trim()) return;
+    if (!newGroupName.trim() || !currentUserId) return;
 
     setIsActionPending(true);
     setStatusMessage(null);
     try {
-      const res = await createTrustGroup({
-        name: newGroupName.trim(),
-        description: newGroupDesc.trim(),
-        icon: newGroupIcon,
-        adminId: currentUserId,
-      });
+      const res = {
+        group: await api.createCircle({ name: newGroupName.trim(), description: newGroupDesc.trim(), icon: newGroupIcon }),
+      };
       setStatusMessage({
         type: 'success',
-        text: `Created "${res.group.name}" with invite code ${res.group.inviteCode}!`,
+        text: `${res.group.name} is ready. Share the code ${res.group.inviteCode} with people you'd like to invite.`,
       });
       setNewGroupName('');
       setNewGroupDesc('');
       fetchGroups();
+      onMembershipChange?.();
       setTimeout(() => setShowCreateModal(false), 1500);
     } catch (err: any) {
       setStatusMessage({
         type: 'error',
-        text: err.message || 'Failed to create group.',
+        text: err.message || 'We could not start that circle. Please try again.',
       });
     } finally {
       setIsActionPending(false);
@@ -150,13 +152,13 @@ export function TrustGroupHub({
           <div className="space-y-2 max-w-xl">
             <div className="inline-flex items-center gap-1.5 px-3 py-1 bg-emerald-500/20 text-emerald-300 rounded-full text-xs font-semibold tracking-wide border border-emerald-500/30">
               <Lock className="w-3.5 h-3.5" />
-              Private Trust Clusters
+              Private circles
             </div>
             <h2 className="text-2xl sm:text-3xl font-extrabold tracking-tight">
-              Private Trust Groups & Co-Ops
+              Share with people you know
             </h2>
             <p className="text-sm text-zinc-300 leading-relaxed">
-              Lower the barrier to sharing high-value gear. Restrict tool rentals, 3D printers, and shared appliances to your verified building, makerspace, or neighborhood co-op.
+              Keep your best gear within your building, makerspace or street. Only members of a circle can see what's shared in it.
             </p>
           </div>
 
@@ -164,24 +166,26 @@ export function TrustGroupHub({
             <button
               id="open-join-group-modal-btn"
               onClick={() => {
+                if (!currentUserId) return onRequireSignIn();
                 setStatusMessage(null);
                 setShowJoinModal(true);
               }}
               className="px-4 py-2.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-100 text-sm font-semibold rounded-xl border border-zinc-700 transition-all flex items-center gap-2 shadow-sm"
             >
               <KeyRound className="w-4 h-4 text-emerald-400" />
-              Enter Invite Code
+              I have a code
             </button>
             <button
               id="open-create-group-modal-btn"
               onClick={() => {
+                if (!currentUserId) return onRequireSignIn();
                 setStatusMessage(null);
                 setShowCreateModal(true);
               }}
               className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-bold rounded-xl transition-all flex items-center gap-2 shadow-lg shadow-emerald-900/30"
             >
               <Plus className="w-4 h-4" />
-              Create Trust Group
+              Start a circle
             </button>
           </div>
         </div>
@@ -193,7 +197,7 @@ export function TrustGroupHub({
           <div className="flex items-center gap-2.5">
             <ShieldCheck className="w-5 h-5 text-emerald-600" />
             <span className="text-sm font-medium text-emerald-900">
-              Filtering marketplace for items exclusive to{' '}
+              Showing listings from{' '}
               <strong className="font-bold">
                 {groups.find((g) => g.id === activeSelectedGroupId)?.name || 'Selected Group'}
               </strong>
@@ -203,7 +207,7 @@ export function TrustGroupHub({
             onClick={() => onFilterByGroup && onFilterByGroup(null)}
             className="text-xs font-bold text-emerald-700 hover:text-emerald-900 underline"
           >
-            Clear Group Filter (Show All Public)
+            Show everything
           </button>
         </div>
       )}
@@ -213,11 +217,9 @@ export function TrustGroupHub({
         <div className="flex items-center justify-between">
           <h3 className="text-base font-bold text-zinc-900 flex items-center gap-2">
             <Users className="w-4 h-4 text-zinc-600" />
-            Your Verified Trust Groups ({groups.length})
+            Circles ({groups.length})
           </h3>
-          <span className="text-xs text-zinc-500">
-            Click &quot;Scope Inventory&quot; to filter listings by group
-          </span>
+
         </div>
 
         {isLoading ? (
@@ -249,11 +251,11 @@ export function TrustGroupHub({
                       {group.isCurrentUserMember ? (
                         <span className="inline-flex items-center gap-1 px-2.5 py-1 bg-emerald-100 text-emerald-800 rounded-full text-xs font-semibold">
                           <Check className="w-3 h-3 text-emerald-600" />
-                          Active Member
+                          Member
                         </span>
                       ) : (
                         <span className="inline-flex items-center gap-1 px-2.5 py-1 bg-zinc-100 text-zinc-600 rounded-full text-xs font-semibold">
-                          Invite Only
+                          Invite only
                         </span>
                       )}
                     </div>
@@ -261,19 +263,20 @@ export function TrustGroupHub({
                     <div>
                       <h4 className="text-base font-bold text-zinc-900">{group.name}</h4>
                       <p className="text-xs text-zinc-500 mt-1 line-clamp-2 leading-relaxed">
-                        {group.description || 'Private sharing circle for verified peers and co-op members.'}
+                        {group.description || 'A private sharing circle.'}
                       </p>
                     </div>
                   </div>
 
                   <div className="pt-3 border-t border-zinc-100 space-y-3">
-                    {/* Invite Code & Stats Row */}
+                    {/* Members & invite code. The code is only ever shown to members. */}
                     <div className="flex items-center justify-between text-xs">
                       <span className="text-zinc-500 flex items-center gap-1">
                         <Users className="w-3.5 h-3.5 text-zinc-400" />
-                        {group.memberCount} verified members
+                        {group.memberCount} {group.memberCount === 1 ? 'member' : 'members'}
                       </span>
 
+                      {group.isCurrentUserMember && (
                       <button
                         type="button"
                         onClick={() => handleCopyCode(group.inviteCode)}
@@ -287,9 +290,12 @@ export function TrustGroupHub({
                         )}
                         {group.inviteCode}
                       </button>
+                      )}
                     </div>
 
-                    {/* Action Button */}
+                    {!group.isCurrentUserMember ? (
+                      <p className="text-[11px] text-zinc-500 text-center">Ask a member for the invite code to join.</p>
+                    ) : (
                     <button
                       type="button"
                       onClick={() => {
@@ -304,9 +310,10 @@ export function TrustGroupHub({
                           : 'bg-zinc-900 text-white hover:bg-zinc-800'
                       )}
                     >
-                      {isSelected ? 'Viewing Group Inventory' : 'Scope Group Inventory'}
+                      {isSelected ? 'Showing its listings' : 'See what it shares'}
                       <ArrowRight className="w-3.5 h-3.5" />
                     </button>
+                    )}
                   </div>
                 </div>
               );
@@ -331,8 +338,8 @@ export function TrustGroupHub({
                 <KeyRound className="w-5 h-5" />
               </div>
               <div>
-                <h3 className="text-base font-bold text-zinc-900">Join Trust Group</h3>
-                <p className="text-xs text-zinc-500">Enter the 6-digit code provided by your co-op admin</p>
+                <h3 className="text-base font-bold text-zinc-900">Join a circle</h3>
+                <p className="text-xs text-zinc-500">Enter the invite code a member shared with you</p>
               </div>
             </div>
 
@@ -352,13 +359,13 @@ export function TrustGroupHub({
             <form onSubmit={handleJoin} className="space-y-4">
               <div>
                 <label className="block text-xs font-bold text-zinc-700 uppercase tracking-wider mb-1.5">
-                  Group Invite Code
+                  Invite code
                 </label>
                 <input
                   type="text"
                   value={inviteCodeInput}
                   onChange={(e) => setInviteCodeInput(e.target.value.toUpperCase())}
-                  placeholder="e.g. WDSTCK-88 or OBSECO-42"
+                  placeholder="e.g. ABCDE-12"
                   className="w-full px-3.5 py-2.5 rounded-xl border border-zinc-300 font-mono text-sm tracking-wider focus:outline-none focus:ring-2 focus:ring-zinc-900 uppercase"
                   required
                 />
@@ -377,7 +384,7 @@ export function TrustGroupHub({
                   disabled={isActionPending}
                   className="px-5 py-2 bg-zinc-900 hover:bg-zinc-800 text-white text-xs font-bold rounded-xl transition-all disabled:opacity-50"
                 >
-                  {isActionPending ? 'Verifying...' : 'Join Group'}
+                  {isActionPending ? 'Joining…' : 'Join'}
                 </button>
               </div>
             </form>
@@ -401,8 +408,8 @@ export function TrustGroupHub({
                 <ShieldCheck className="w-5 h-5" />
               </div>
               <div>
-                <h3 className="text-base font-bold text-zinc-900">Create Trust Group</h3>
-                <p className="text-xs text-zinc-500">Setup a private sharing circle for your community</p>
+                <h3 className="text-base font-bold text-zinc-900">Start a circle</h3>
+                <p className="text-xs text-zinc-500">You'll get an invite code to share with people you trust</p>
               </div>
             </div>
 
@@ -422,7 +429,7 @@ export function TrustGroupHub({
             <form onSubmit={handleCreate} className="space-y-4">
               <div>
                 <label className="block text-xs font-bold text-zinc-700 uppercase tracking-wider mb-1.5">
-                  Group Name
+                  Name
                 </label>
                 <input
                   type="text"
@@ -442,14 +449,14 @@ export function TrustGroupHub({
                   rows={2}
                   value={newGroupDesc}
                   onChange={(e) => setNewGroupDesc(e.target.value)}
-                  placeholder="Describe who can join and what tools/assets are shared..."
+                  placeholder="Who is it for, and what will you share?"
                   className="w-full px-3.5 py-2 rounded-xl border border-zinc-300 text-xs focus:outline-none focus:ring-2 focus:ring-zinc-900"
                 />
               </div>
 
               <div>
                 <label className="block text-xs font-bold text-zinc-700 uppercase tracking-wider mb-1.5">
-                  Category Icon
+                  Icon
                 </label>
                 <div className="grid grid-cols-4 gap-2">
                   {[
@@ -489,7 +496,7 @@ export function TrustGroupHub({
                   disabled={isActionPending}
                   className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl transition-all disabled:opacity-50 shadow-md shadow-emerald-900/20"
                 >
-                  {isActionPending ? 'Generating Code...' : 'Create Group'}
+                  {isActionPending ? 'Creating…' : 'Create circle'}
                 </button>
               </div>
             </form>

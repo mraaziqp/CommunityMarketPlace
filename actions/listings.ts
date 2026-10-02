@@ -1,8 +1,6 @@
-'use server';
 
-import { db, memoryStore } from '../db';
+import { memoryStore } from '../db';
 import * as schema from '../db/schema';
-import { eq, and, desc, sql } from 'drizzle-orm';
 import { validateInput, CreateListingSchema } from '../lib/validations';
 import {
   ListingCategory,
@@ -10,7 +8,6 @@ import {
   PricingTierModel,
   PricingType,
   GeospatialSearchParams,
-  SystemLogModel,
 } from '../src/types';
 import { INITIAL_LISTINGS } from '../src/data/mockListings';
 
@@ -93,8 +90,7 @@ export async function createListing(input: CreateListingInput): Promise<CreateLi
       description,
       category,
       categoryId,
-      categorySlug,
-      ownerId = 'usr_me',
+      ownerId,
       address,
       neighborhood,
       city,
@@ -106,9 +102,6 @@ export async function createListing(input: CreateListingInput): Promise<CreateLi
       maxSubscribers = category === 'fractional_appliance' ? 4 : 1,
       accessMethod = category === 'fractional_appliance' ? 'smart_plug' : 'pin_code',
       visibilityGroupId = null,
-      visibilityGroupName,
-      specs,
-      amenities = ['Community Verified', 'Maintenance Support'],
       pricingTiers = [],
     } = { ...input, ...validated };
 
@@ -119,33 +112,21 @@ export async function createListing(input: CreateListingInput): Promise<CreateLi
         ? images
         : ['https://images.unsplash.com/photo-1582735689369-4fe89db7114c?w=800'];
 
-    // 1. Fetch real host/owner details from database or memoryStore
-    let ownerUser: any = null;
-    try {
-      if ((db as any).query?.users) {
-        ownerUser = await (db as any).query.users.findFirst({
-          where: eq(schema.users.id, ownerId),
-        });
-      }
-    } catch (e) {
-      console.warn('Host lookup fallback:', e);
-    }
+    // 1. The host must be a signed-in member.
+    const ownerUser = ownerId ? memoryStore.users.get(ownerId) : undefined;
     if (!ownerUser) {
-      ownerUser = memoryStore.users.get(ownerId) || {
-        id: ownerId,
-        name: 'Alex Rivera',
-        email: 'alex.rivera@community.org',
-        emailVerified: true,
-        role: 'ADMIN',
-        image: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80',
-        phoneNumber: '+27 82 555 0192',
-        bio: 'Eco-conscious neighbor & shared appliance co-op coordinator.',
-        neighborhood: neighborhood || 'Observatory',
-        trustScore: 100,
-        isHost: true,
-        createdAt: now,
-        updatedAt: now,
-      };
+      return { success: false, error: 'Please sign in to share an item.' };
+    }
+    if (!ownerUser.isHost) {
+      memoryStore.users.set(ownerUser.id, { ...ownerUser, isHost: true, updatedAt: now });
+    }
+    if (visibilityGroupId) {
+      const isMember = Array.from(memoryStore.groupMemberships.values()).some(
+        (m) => m.groupId === visibilityGroupId && m.userId === ownerUser.id && m.status === 'ACTIVE'
+      );
+      if (!isMember) {
+        return { success: false, error: 'You can only share privately with circles you belong to.' };
+      }
     }
 
     // 2. Prepare listing record
@@ -156,14 +137,13 @@ export async function createListing(input: CreateListingInput): Promise<CreateLi
       category: category as any,
       categoryId: categoryId || null,
       ownerId: ownerUser.id,
-      address: address || 'Community Co-Op Hub',
-      neighborhood: neighborhood || 'Observatory',
-      city: city || 'Cape Town',
-      latitude: latitude ? String(latitude) : '-33.9360',
-      longitude: longitude ? String(longitude) : '18.4715',
-      location: null,
+      address: address.trim(),
+      neighborhood: neighborhood.trim(),
+      city: city.trim(),
+      latitude: latitude != null && latitude !== '' ? String(latitude) : null,
+      longitude: longitude != null && longitude !== '' ? String(longitude) : null,
       images: cleanImages,
-      rules: rules || 'Please treat shared assets with respect and log usage timestamps accurately.',
+      rules: rules?.trim() || null,
       depositRequiredInCents,
       maxSubscribers,
       currentSubscribersCount: 0,
@@ -212,32 +192,7 @@ export async function createListing(input: CreateListingInput): Promise<CreateLi
       };
     });
 
-    // 4. Execute atomic insert into Neon PostgreSQL / Drizzle ORM
-    try {
-      await (db as any).insert(schema.listings).values(newListingRecord).returning();
-      for (const tier of insertedTiers) {
-        await (db as any).insert(schema.pricingTiers).values({
-          id: tier.id,
-          listingId: tier.listingId,
-          name: tier.name,
-          description: tier.description || null,
-          type: tier.type as any,
-          priceInCents: tier.priceInCents,
-          currency: tier.currency,
-          usageLimitPerPeriod: tier.usageLimitPerPeriod,
-          periodUnit: tier.periodUnit as any,
-          periodDuration: tier.periodDuration,
-          maxActiveSubscribers: tier.maxActiveSubscribers,
-          isPopular: tier.isPopular || false,
-          isActive: tier.isActive,
-          createdAt: now,
-        });
-      }
-    } catch (dbErr) {
-      console.warn('Neon DB direct insert note (synced to store):', dbErr);
-    }
-
-    // Always update in-memory / cache store for instant responsiveness
+    // 4. Save the listing and its tiers
     memoryStore.listings.set(listingId, newListingRecord);
     for (const tier of insertedTiers) {
       memoryStore.pricingTiers.set(tier.id, {
@@ -282,57 +237,11 @@ export async function createListing(input: CreateListingInput): Promise<CreateLi
       createdAt: now,
     };
 
-    try {
-      await (db as any).insert(schema.systemLogs).values(systemLogRecord);
-    } catch (e) {
-      console.warn('SystemLog insert note:', e);
-    }
     memoryStore.systemLogs.set(systemLogId, systemLogRecord);
-
-    // 6. Assemble complete ListingModel response
-    const fullListing: ListingModel = {
-      id: listingId,
-      title: newListingRecord.title,
-      description: newListingRecord.description,
-      category: newListingRecord.category as ListingCategory,
-      categoryId: newListingRecord.categoryId,
-      categorySlug: categorySlug || undefined,
-      owner: {
-        id: ownerUser.id,
-        name: ownerUser.name,
-        image: ownerUser.image || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150',
-        trustScore: ownerUser.trustScore ?? 100,
-        neighborhood: `${newListingRecord.neighborhood}, ${newListingRecord.city}`,
-        isSuperHost: ownerUser.role === 'VERIFIED_HOST' || ownerUser.role === 'ADMIN',
-      },
-      address: newListingRecord.address,
-      neighborhood: newListingRecord.neighborhood,
-      city: newListingRecord.city,
-      latitude: parseFloat(newListingRecord.latitude || '-33.9360'),
-      longitude: parseFloat(newListingRecord.longitude || '18.4715'),
-      images: newListingRecord.images,
-      rules: newListingRecord.rules || undefined,
-      depositRequiredInCents: newListingRecord.depositRequiredInCents,
-      maxSubscribers: newListingRecord.maxSubscribers,
-      currentSubscribersCount: 0,
-      isAvailable: true,
-      visibilityGroupId: newListingRecord.visibilityGroupId,
-      visibilityGroupName: visibilityGroupName || undefined,
-      accessMethod: newListingRecord.accessMethod as any,
-      specs: specs || {
-        brand: 'Community Verified',
-        warrantyStatus: 'Active',
-      },
-      amenities,
-      pricingTiers: insertedTiers,
-      rating: 5.0,
-      reviewCount: 0,
-      createdAt: now.toISOString(),
-    };
 
     return {
       success: true,
-      listing: fullListing,
+      listing: toListingModel(newListingRecord),
       systemLog: {
         id: systemLogRecord.id,
         eventType: systemLogRecord.eventType,
@@ -353,303 +262,106 @@ export async function createListing(input: CreateListingInput): Promise<CreateLi
 
 /**
  * ============================================================================
- * SERVER ACTION: getListings
- * Fetches real active listings from Neon Database with owner & pricing tiers.
+ * LISTING READS
+ * The store is the single source of truth. Catalogue listings carry extra
+ * detail (specs, amenities, historical rating) that the store schema has no
+ * columns for, so that is merged back in from the catalogue by id.
  * ============================================================================
  */
-export async function getListings(
-  params: GeospatialSearchParams = {}
-): Promise<ListingModel[]> {
-  try {
-    // 1. Gather all database / memoryStore listings
-    let rawListings: any[] = [];
 
-    try {
-      if ((db as any).query?.listings) {
-        rawListings = await (db as any).query.listings.findMany({
-          where: eq(schema.listings.isAvailable, true),
-          with: {
-            owner: true,
-            pricingTiers: true,
-          },
-        });
-      }
-    } catch (e) {
-      console.warn('Database findMany note:', e);
-    }
-
-    if (!rawListings || rawListings.length === 0) {
-      // Load from memoryStore + defaults
-      if (memoryStore.listings.size === 0) {
-        // Seed initial listings into memoryStore
-        for (const item of INITIAL_LISTINGS) {
-          memoryStore.listings.set(item.id, {
-            id: item.id,
-            title: item.title,
-            description: item.description,
-            category: item.category as any,
-            categoryId: item.categoryId || null,
-            ownerId: item.owner.id,
-            address: item.address,
-            neighborhood: item.neighborhood,
-            city: item.city,
-            latitude: item.latitude ? String(item.latitude) : '-33.9360',
-            longitude: item.longitude ? String(item.longitude) : '18.4715',
-            location: null,
-            images: item.images,
-            rules: item.rules || null,
-            depositRequiredInCents: item.depositRequiredInCents,
-            maxSubscribers: item.maxSubscribers,
-            currentSubscribersCount: item.currentSubscribersCount,
-            isAvailable: item.isAvailable,
-            visibilityGroupId: item.visibilityGroupId || null,
-            accessMethod: item.accessMethod || 'pin_code',
-            createdAt: new Date(),
-            updatedAt: new Date(),
-          });
-
-          for (const tier of item.pricingTiers) {
-            memoryStore.pricingTiers.set(tier.id, {
-              id: tier.id,
-              listingId: tier.listingId,
-              name: tier.name,
-              description: tier.description || null,
-              type: tier.type as any,
-              priceInCents: tier.priceInCents,
-              currency: tier.currency,
-              usageLimitPerPeriod: tier.usageLimitPerPeriod || null,
-              periodUnit: tier.periodUnit as any,
-              periodDuration: tier.periodDuration,
-              maxActiveSubscribers: tier.maxActiveSubscribers || null,
-              isPopular: tier.isPopular || false,
-              isActive: tier.isActive,
-              createdAt: new Date(),
-            });
-          }
-        }
-      }
-
-      rawListings = Array.from(memoryStore.listings.values());
-    }
-
-    // 2. Map database rows to complete ListingModel
-    const mapped: ListingModel[] = rawListings.map((row: any) => {
-      const owner =
-        row.owner ||
-        memoryStore.users.get(row.ownerId) || {
-          id: row.ownerId || 'usr_me',
-          name: 'Alex Rivera',
-          image: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150',
-          trustScore: 98,
-          neighborhood: row.neighborhood || 'Observatory',
-          role: 'ADMIN',
-        };
-
-      let tiers: PricingTierModel[] = row.pricingTiers || [];
-      if (tiers.length === 0) {
-        tiers = Array.from(memoryStore.pricingTiers.values())
-          .filter((t) => t.listingId === row.id)
-          .map((t) => ({
-            id: t.id,
-            listingId: t.listingId,
-            name: t.name,
-            description: t.description || undefined,
-            type: t.type as PricingType,
-            priceInCents: t.priceInCents,
-            currency: t.currency,
-            usageLimitPerPeriod: t.usageLimitPerPeriod,
-            periodUnit: t.periodUnit as any,
-            periodDuration: t.periodDuration,
-            maxActiveSubscribers: t.maxActiveSubscribers,
-            isPopular: t.isPopular,
-            isActive: t.isActive,
-          }));
-      }
-
-      if (tiers.length === 0) {
-        tiers = [
-          {
-            id: `tier_${row.id}_default`,
-            listingId: row.id,
-            name: row.category === 'fractional_appliance' ? 'Co-Op Monthly' : 'Day Pass',
-            type: (row.category === 'fractional_appliance' ? 'monthly_subscription' : 'daily') as PricingType,
-            priceInCents: row.category === 'fractional_appliance' ? 45000 : 15000,
-            currency: 'ZAR',
-            usageLimitPerPeriod: row.category === 'fractional_appliance' ? 10 : null,
-            periodUnit: (row.category === 'fractional_appliance' ? 'month' : 'day') as any,
-            periodDuration: 1,
-            isActive: true,
-          },
-        ];
-      }
-
-      return {
-        id: row.id,
-        title: row.title,
-        description: row.description,
-        category: row.category,
-        categoryId: row.categoryId,
-        categorySlug: row.categorySlug,
-        owner: {
-          id: owner.id,
-          name: owner.name,
-          image: owner.image || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150',
-          trustScore: owner.trustScore ?? 99,
-          neighborhood: `${row.neighborhood || 'Observatory'}, ${row.city || 'Cape Town'}`,
-          isSuperHost: owner.role === 'VERIFIED_HOST' || owner.role === 'ADMIN',
-        },
-        address: row.address,
-        neighborhood: row.neighborhood,
-        city: row.city,
-        latitude: row.latitude ? parseFloat(row.latitude) : null,
-        longitude: row.longitude ? parseFloat(row.longitude) : null,
-        images: Array.isArray(row.images) && row.images.length > 0 ? row.images : ['https://images.unsplash.com/photo-1582735689369-4fe89db7114c?w=800'],
-        rules: row.rules || undefined,
-        depositRequiredInCents: row.depositRequiredInCents ?? 20000,
-        maxSubscribers: row.maxSubscribers ?? 4,
-        currentSubscribersCount: row.currentSubscribersCount ?? 0,
-        isAvailable: row.isAvailable ?? true,
-        visibilityGroupId: row.visibilityGroupId,
-        accessMethod: (row.accessMethod as any) || 'pin_code',
-        amenities: ['Community Verified', 'Maintenance Support', 'Zero-Queue Policy'],
-        pricingTiers: tiers,
-        rating: 4.95,
-        reviewCount: 12,
-        createdAt: row.createdAt ? new Date(row.createdAt).toISOString() : new Date().toISOString(),
-      };
-    });
-
-    return mapped;
-  } catch (error) {
-    console.error('Error fetching listings from Neon DB:', error);
-    return INITIAL_LISTINGS;
-  }
-}
+const FALLBACK_LISTING_IMAGE = 'https://images.unsplash.com/photo-1582735689369-4fe89db7114c?w=800';
+const FALLBACK_AVATAR = 'https://images.unsplash.com/photo-1511367461989-f85a21fda167?w=150&auto=format&fit=crop&q=80';
 
 /**
- * ============================================================================
- * SERVER ACTION: getListingById
- * Queries live data by listing ID, including host's real trust score and availability.
- * ============================================================================
+ * Rating for a listing: the catalogue's historical reviews combined with any
+ * reviews left through ShareHub. Listings with no reviews have no rating.
  */
-export async function getListingById(id: string): Promise<ListingModel | null> {
-  if (!id) return null;
-
-  try {
-    // 1. Direct Drizzle query if database is configured
-    let rawListing: any = null;
-    try {
-      if ((db as any).query?.listings) {
-        rawListing = await (db as any).query.listings.findFirst({
-          where: eq(schema.listings.id, id),
-          with: {
-            owner: true,
-            pricingTiers: true,
-          },
-        });
-      }
-    } catch (e) {
-      console.warn('getListingById query note:', e);
+export function getListingRating(listingId: string): { rating: number | undefined; reviewCount: number } {
+  const catalogue = INITIAL_LISTINGS.find((l) => l.id === listingId);
+  let total = (catalogue?.rating ?? 0) * (catalogue?.reviewCount ?? 0);
+  let count = catalogue?.reviewCount ?? 0;
+  for (const review of memoryStore.reviews.values()) {
+    if (review.listingId === listingId) {
+      total += review.rating;
+      count++;
     }
-
-    if (!rawListing) {
-      rawListing = memoryStore.listings.get(id);
-    }
-
-    if (!rawListing) {
-      // Check mock listings
-      const fallback = INITIAL_LISTINGS.find((l) => l.id === id);
-      if (fallback) return fallback;
-      return null;
-    }
-
-    // 2. Fetch fresh host record for live trust score
-    const owner =
-      rawListing.owner ||
-      memoryStore.users.get(rawListing.ownerId) || {
-        id: rawListing.ownerId || 'usr_me',
-        name: 'Alex Rivera',
-        image: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150',
-        trustScore: 99,
-        neighborhood: rawListing.neighborhood,
-        role: 'ADMIN',
-      };
-
-    // 3. Fetch pricing tiers
-    let tiers: PricingTierModel[] = rawListing.pricingTiers || [];
-    if (tiers.length === 0) {
-      tiers = Array.from(memoryStore.pricingTiers.values())
-        .filter((t) => t.listingId === id)
-        .map((t) => ({
-          id: t.id,
-          listingId: t.listingId,
-          name: t.name,
-          description: t.description || undefined,
-          type: t.type as PricingType,
-          priceInCents: t.priceInCents,
-          currency: t.currency,
-          usageLimitPerPeriod: t.usageLimitPerPeriod,
-          periodUnit: t.periodUnit as any,
-          periodDuration: t.periodDuration,
-          maxActiveSubscribers: t.maxActiveSubscribers,
-          isPopular: t.isPopular,
-          isActive: t.isActive,
-        }));
-    }
-
-    if (tiers.length === 0) {
-      tiers = [
-        {
-          id: `tier_${rawListing.id}_default`,
-          listingId: rawListing.id,
-          name: rawListing.category === 'fractional_appliance' ? 'Co-Op Monthly' : 'Day Pass',
-          type: (rawListing.category === 'fractional_appliance' ? 'monthly_subscription' : 'daily') as PricingType,
-          priceInCents: rawListing.category === 'fractional_appliance' ? 45000 : 15000,
-          currency: 'ZAR',
-          usageLimitPerPeriod: rawListing.category === 'fractional_appliance' ? 10 : null,
-          periodUnit: (rawListing.category === 'fractional_appliance' ? 'month' : 'day') as any,
-          periodDuration: 1,
-          isActive: true,
-        },
-      ];
-    }
-
-    return {
-      id: rawListing.id,
-      title: rawListing.title,
-      description: rawListing.description,
-      category: rawListing.category,
-      categoryId: rawListing.categoryId,
-      categorySlug: rawListing.categorySlug,
-      owner: {
-        id: owner.id,
-        name: owner.name,
-        image: owner.image || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150',
-        trustScore: owner.trustScore ?? 99,
-        neighborhood: `${rawListing.neighborhood}, ${rawListing.city}`,
-        isSuperHost: owner.role === 'VERIFIED_HOST' || owner.role === 'ADMIN',
-      },
-      address: rawListing.address,
-      neighborhood: rawListing.neighborhood,
-      city: rawListing.city,
-      latitude: rawListing.latitude ? parseFloat(rawListing.latitude) : null,
-      longitude: rawListing.longitude ? parseFloat(rawListing.longitude) : null,
-      images: Array.isArray(rawListing.images) && rawListing.images.length > 0 ? rawListing.images : ['https://images.unsplash.com/photo-1582735689369-4fe89db7114c?w=800'],
-      rules: rawListing.rules || undefined,
-      depositRequiredInCents: rawListing.depositRequiredInCents ?? 20000,
-      maxSubscribers: rawListing.maxSubscribers ?? 4,
-      currentSubscribersCount: rawListing.currentSubscribersCount ?? 0,
-      isAvailable: rawListing.isAvailable ?? true,
-      visibilityGroupId: rawListing.visibilityGroupId,
-      accessMethod: (rawListing.accessMethod as any) || 'pin_code',
-      amenities: ['Community Verified', 'Maintenance Support', 'Zero-Queue Policy'],
-      pricingTiers: tiers,
-      rating: 4.96,
-      reviewCount: 18,
-      createdAt: rawListing.createdAt ? new Date(rawListing.createdAt).toISOString() : new Date().toISOString(),
-    };
-  } catch (error) {
-    console.error(`Error fetching listing by ID ${id}:`, error);
-    return null;
   }
+  return { rating: count > 0 ? Math.round((total / count) * 100) / 100 : undefined, reviewCount: count };
+}
+
+function toPricingTierModel(t: schema.PricingTier): PricingTierModel {
+  return {
+    id: t.id,
+    listingId: t.listingId,
+    name: t.name,
+    description: t.description || undefined,
+    type: t.type as PricingType,
+    priceInCents: t.priceInCents,
+    currency: t.currency,
+    usageLimitPerPeriod: t.usageLimitPerPeriod,
+    periodUnit: t.periodUnit as PricingTierModel['periodUnit'],
+    periodDuration: t.periodDuration,
+    maxActiveSubscribers: t.maxActiveSubscribers,
+    isPopular: t.isPopular,
+    isActive: t.isActive,
+  };
+}
+
+/** Maps a stored listing row to the model the UI renders. */
+export function toListingModel(row: schema.Listing): ListingModel {
+  const catalogue = INITIAL_LISTINGS.find((l) => l.id === row.id);
+  const owner = memoryStore.users.get(row.ownerId);
+  const group = row.visibilityGroupId ? memoryStore.trustGroups.get(row.visibilityGroupId) : undefined;
+  const { rating, reviewCount } = getListingRating(row.id);
+
+  return {
+    id: row.id,
+    title: row.title,
+    description: row.description,
+    category: row.category as ListingCategory,
+    categoryId: row.categoryId,
+    categorySlug: catalogue?.categorySlug,
+    owner: {
+      id: row.ownerId,
+      name: owner?.name ?? 'ShareHub member',
+      image: owner?.image || FALLBACK_AVATAR,
+      trustScore: owner?.trustScore ?? 90,
+      neighborhood: `${row.neighborhood}, ${row.city}`,
+      isSuperHost: owner?.role === 'VERIFIED_HOST',
+    },
+    address: row.address,
+    neighborhood: row.neighborhood,
+    city: row.city,
+    latitude: row.latitude ? parseFloat(row.latitude) : null,
+    longitude: row.longitude ? parseFloat(row.longitude) : null,
+    images: Array.isArray(row.images) && row.images.length > 0 ? row.images : [FALLBACK_LISTING_IMAGE],
+    rules: row.rules || undefined,
+    depositRequiredInCents: row.depositRequiredInCents,
+    visibilityGroupId: row.visibilityGroupId,
+    visibilityGroupName: group?.name ?? null,
+    maxSubscribers: row.maxSubscribers,
+    currentSubscribersCount: row.currentSubscribersCount,
+    isAvailable: row.isAvailable,
+    accessMethod: row.accessMethod as ListingModel['accessMethod'],
+    specs: catalogue?.specs,
+    amenities: catalogue?.amenities ?? [],
+    pricingTiers: Array.from(memoryStore.pricingTiers.values())
+      .filter((t) => t.listingId === row.id && t.isActive)
+      .map(toPricingTierModel),
+    rating,
+    reviewCount,
+    createdAt: row.createdAt.toISOString(),
+  };
+}
+
+/** All available listings. Filtering, visibility and distance are applied by searchListings. */
+export async function getListings(_params: GeospatialSearchParams = {}): Promise<ListingModel[]> {
+  return Array.from(memoryStore.listings.values())
+    .filter((row) => row.isAvailable !== false && !memoryStore.users.get(row.ownerId)?.suspendedAt)
+    .map(toListingModel);
+}
+
+export async function getListingById(id: string): Promise<ListingModel | null> {
+  const row = id ? memoryStore.listings.get(id) : undefined;
+  return row ? toListingModel(row) : null;
 }

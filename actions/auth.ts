@@ -1,261 +1,417 @@
-'use server';
-
-import { db, memoryStore } from '../db';
+import { createHash, randomBytes, scrypt as scryptCb, timingSafeEqual } from 'node:crypto';
+import { promisify } from 'node:util';
+import { memoryStore } from '../db';
 import * as schema from '../db/schema';
-import { eq, sql } from 'drizzle-orm';
-import { UserModel, UserRole, AuthSession } from '../src/types';
+import type { UserModel, UserRole, AuthSession } from '../src/types';
+import { config } from '../server/config';
 
 /**
  * ============================================================================
- * BETTER AUTH SERVER ACTIONS & SESSION PROVIDER
- * Supports Email/Password, Google OAuth, and Role-Based Access Control (RBAC)
+ * ACCOUNTS & SESSIONS (server only)
+ *
+ * - Everyone signs up as a USER. ADMIN comes only from the server-side
+ *   ADMIN_EMAILS allowlist; the role is re-derived on every request.
+ * - Passwords are hashed with scrypt and stored in the `account` table.
+ * - Session tokens are random 256-bit values. Only their SHA-256 hash is
+ *   stored, so a database leak does not leak live sessions.
+ * - One-tap demo accounts exist only when DEMO_MODE is on.
  * ============================================================================
  */
+
+const scrypt = promisify(scryptCb) as (password: string, salt: Buffer, keylen: number) => Promise<Buffer>;
 
 export interface SignUpParams {
   name: string;
   email: string;
-  password?: string;
-  role?: UserRole;
+  password: string;
   neighborhood?: string;
-  isHost?: boolean;
 }
 
 export interface SignInParams {
   email: string;
-  password?: string;
+  password: string;
 }
 
-// Pre-seeded demo accounts for instant 1-click evaluation
-export const DEMO_ACCOUNTS: Record<UserRole, UserModel> = {
-  ADMIN: {
-    id: 'usr_admin_01',
-    name: 'Alex Rivera (Principal Admin)',
-    email: 'admin@sharehub.community',
-    emailVerified: true,
-    role: 'ADMIN',
-    image: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80',
-    phoneNumber: '+27 82 555 0192',
-    bio: 'ShareHub Platform Administrator & Co-Op Coordinator.',
-    neighborhood: 'City Bowl / Gardens',
-    trustScore: 100,
-    isHost: true,
-  },
-  VERIFIED_HOST: {
-    id: 'usr_host_02',
-    name: 'Thabo Mokoena (Verified Host)',
-    email: 'thabo@capetownmakers.co.za',
-    emailVerified: true,
-    role: 'VERIFIED_HOST',
-    image: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=150&auto=format&fit=crop&q=80',
-    phoneNumber: '+27 83 444 8812',
-    bio: 'Professional Woodworker & Heavy Machinery Co-Op Host.',
-    neighborhood: 'Woodstock & Salt River',
-    trustScore: 98,
-    isHost: true,
-  },
-  USER: {
-    id: 'usr_member_03',
-    name: 'Sarah Jenkins (Member)',
-    email: 'sarah.jenkins@gmail.com',
-    emailVerified: true,
-    role: 'USER',
-    image: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=150&auto=format&fit=crop&q=80',
-    phoneNumber: '+27 84 222 9011',
-    bio: 'Neighbourhood renter & appliance co-op subscriber.',
-    neighborhood: 'Observatory',
-    trustScore: 95,
-    isHost: false,
-  },
+export interface RequestMeta {
+  ipAddress?: string | null;
+  userAgent?: string | null;
+}
+
+export type AuthResult = { success: true; session: AuthSession & { token: string } } | { success: false; error: string };
+
+const MIN_PASSWORD_LENGTH = 6;
+const CREDENTIAL_PROVIDER = 'credential';
+
+/** Seeded users behind the one-tap demo accounts (demo mode only). */
+export const DEMO_ACCOUNT_IDS: Record<UserRole, string> = {
+  USER: 'usr_me',
+  VERIFIED_HOST: 'usr_tariq',
+  ADMIN: 'usr_admin_01',
 };
 
-/**
- * Sign up a new user with Better Auth credentials
- */
-export async function signUpWithEmailPassword(
-  params: SignUpParams
-): Promise<{ success: boolean; session?: AuthSession; error?: string }> {
-  try {
-    const { name, email, role = 'USER', neighborhood = 'City Bowl', isHost = false } = params;
+// --- Helpers ---
 
-    if (!email || !name) {
-      return { success: false, error: 'Name and email are required.' };
-    }
+const newId = (prefix: string) => `${prefix}_${Date.now()}_${randomBytes(4).toString('hex')}`;
+const normalizeEmail = (email: string) => email.trim().toLowerCase();
+export const hashToken = (token: string) => createHash('sha256').update(token).digest('hex');
 
-    const userId = `usr_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
-    const now = new Date();
+async function hashPassword(password: string): Promise<string> {
+  const salt = randomBytes(16);
+  const key = await scrypt(password, salt, 64);
+  return `scrypt$${salt.toString('hex')}$${key.toString('hex')}`;
+}
 
-    const newUserRecord: schema.User = {
-      id: userId,
+async function verifyPassword(password: string, stored: string): Promise<boolean> {
+  const [algo, saltHex, keyHex] = stored.split('$');
+  if (algo !== 'scrypt' || !saltHex || !keyHex) return false;
+  const expected = Buffer.from(keyHex, 'hex');
+  const actual = await scrypt(password, Buffer.from(saltHex, 'hex'), expected.length);
+  return timingSafeEqual(expected, actual);
+}
+
+function findUserByEmail(email: string): schema.User | undefined {
+  const clean = normalizeEmail(email);
+  for (const user of memoryStore.users.values()) {
+    if (user.email.toLowerCase() === clean) return user;
+  }
+  return undefined;
+}
+
+function credentialFor(userId: string) {
+  for (const account of memoryStore.accounts.values()) {
+    if (account.userId === userId && account.providerId === CREDENTIAL_PROVIDER) return account;
+  }
+  return undefined;
+}
+
+/** Allowlisted emails are admins; outside demo mode nobody else can hold ADMIN. */
+function resolveRole(email: string, storedRole: UserRole): UserRole {
+  if (config().adminEmails.has(normalizeEmail(email))) return 'ADMIN';
+  if (storedRole === 'ADMIN' && !config().demoMode) return 'USER';
+  return storedRole;
+}
+
+export function toUserModel(user: schema.User): UserModel {
+  return {
+    id: user.id,
+    name: user.name,
+    email: user.email,
+    emailVerified: user.emailVerified,
+    role: resolveRole(user.email, user.role as UserRole),
+    image: user.image,
+    phoneNumber: user.phoneNumber,
+    bio: user.bio,
+    neighborhood: user.neighborhood,
+    trustScore: user.trustScore,
+    isHost: user.isHost,
+    suspended: !!user.suspendedAt,
+    createdAt: user.createdAt.toISOString(),
+    updatedAt: user.updatedAt.toISOString(),
+  };
+}
+
+function logAuthEvent(eventType: 'AUTH_SIGNIN' | 'AUTH_SIGNUP', user: schema.User, method: string) {
+  const id = newId('sys_auth');
+  memoryStore.systemLogs.set(id, {
+    id,
+    eventType,
+    userId: user.id,
+    targetId: user.id,
+    metadata: { method },
+    createdAt: new Date(),
+  });
+}
+
+function startSession(user: schema.User, method: string, eventType: 'AUTH_SIGNIN' | 'AUTH_SIGNUP', meta: RequestMeta): AuthResult {
+  const now = new Date();
+  const expires = new Date(now.getTime() + config().sessionTtlDays * 24 * 60 * 60 * 1000);
+  const token = randomBytes(32).toString('base64url');
+  const id = newId('sess');
+  memoryStore.sessions.set(id, {
+    id,
+    token: hashToken(token),
+    userId: user.id,
+    expiresAt: expires,
+    ipAddress: meta.ipAddress ?? null,
+    userAgent: meta.userAgent?.slice(0, 300) ?? null,
+    createdAt: now,
+    updatedAt: now,
+  });
+  logAuthEvent(eventType, user, method);
+  return { success: true, session: { user: toUserModel(user), token, expiresAt: expires.toISOString() } };
+}
+
+// --- Public API ---
+
+export async function signUpWithEmailPassword(params: SignUpParams, meta: RequestMeta = {}): Promise<AuthResult> {
+  const name = params.name?.trim() ?? '';
+  const email = normalizeEmail(params.email ?? '');
+  const password = params.password ?? '';
+
+  if (name.length < 2 || name.length > 80) return { success: false, error: 'Please tell us your name.' };
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) {
+    return { success: false, error: 'Please enter a valid email address.' };
+  }
+  if (password.length < MIN_PASSWORD_LENGTH || password.length > 200) {
+    return { success: false, error: `Your password needs at least ${MIN_PASSWORD_LENGTH} characters.` };
+  }
+  if (findUserByEmail(email)) {
+    return { success: false, error: 'There is already an account with that email. Try signing in instead.' };
+  }
+
+  const now = new Date();
+  const user: schema.User = {
+    id: newId('usr'),
+    name,
+    email,
+    emailVerified: false,
+    role: config().adminEmails.has(email) ? 'ADMIN' : 'USER',
+    image: null,
+    phoneNumber: null,
+    bio: null,
+    neighborhood: params.neighborhood?.trim().slice(0, 150) || null,
+    trustScore: 90,
+    isHost: false,
+    suspendedAt: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+  memoryStore.users.set(user.id, user);
+
+  const accountId = newId('acct');
+  memoryStore.accounts.set(accountId, {
+    id: accountId,
+    accountId: user.id,
+    providerId: CREDENTIAL_PROVIDER,
+    userId: user.id,
+    accessToken: null,
+    refreshToken: null,
+    idToken: null,
+    accessTokenExpiresAt: null,
+    refreshTokenExpiresAt: null,
+    scope: null,
+    password: await hashPassword(password),
+    createdAt: now,
+    updatedAt: now,
+  });
+
+  return startSession(user, 'EMAIL_PASSWORD', 'AUTH_SIGNUP', meta);
+}
+
+export async function signInWithEmailPassword(params: SignInParams, meta: RequestMeta = {}): Promise<AuthResult> {
+  const user = findUserByEmail(params.email ?? '');
+  const credential = user ? credentialFor(user.id) : undefined;
+  const fail: AuthResult = { success: false, error: 'Incorrect email or password.' };
+
+  if (!user) return fail;
+  if (user.suspendedAt) return { success: false, error: 'This account has been suspended. Please contact support.' };
+  if (!credential?.password) {
+    // Seeded demo users have no password and are only reachable in demo mode.
+    return config().demoMode ? startSession(user, 'DEMO', 'AUTH_SIGNIN', meta) : fail;
+  }
+  if (!(await verifyPassword(params.password ?? '', credential.password))) return fail;
+  return startSession(user, 'EMAIL_PASSWORD', 'AUTH_SIGNIN', meta);
+}
+
+/** One-tap sign-in as a seeded demo user (demo mode only). */
+export async function signInAsDemoUser(role: UserRole, meta: RequestMeta = {}): Promise<AuthResult> {
+  if (!config().demoMode) return { success: false, error: 'Demo accounts are not available.' };
+  const user = memoryStore.users.get(DEMO_ACCOUNT_IDS[role]);
+  if (!user) return { success: false, error: 'That demo account is not available.' };
+  return startSession(user, 'DEMO', 'AUTH_SIGNIN', meta);
+}
+
+/** The signed-in user for a session token, or null if missing or expired. */
+export function getSessionUser(token: string | undefined | null): UserModel | null {
+  if (!token) return null;
+  const hashed = hashToken(token);
+  for (const session of memoryStore.sessions.values()) {
+    if (session.token !== hashed) continue;
+    if (session.expiresAt.getTime() <= Date.now()) return null;
+    const user = memoryStore.users.get(session.userId);
+    return user && !user.suspendedAt ? toUserModel(user) : null;
+  }
+  return null;
+}
+
+export function signOut(token: string | undefined | null) {
+  if (!token) return;
+  const hashed = hashToken(token);
+  for (const [id, session] of memoryStore.sessions) {
+    if (session.token === hashed) memoryStore.sessions.delete(id);
+  }
+}
+
+/** Removes expired sessions (called periodically). */
+export function pruneExpiredSessions() {
+  const now = Date.now();
+  for (const [id, session] of memoryStore.sessions) {
+    if (session.expiresAt.getTime() <= now) memoryStore.sessions.delete(id);
+  }
+}
+
+/** Current profile for a user id, with the effective role applied. */
+export function getUserById(userId: string): UserModel | null {
+  const user = memoryStore.users.get(userId);
+  return user ? toUserModel(user) : null;
+}
+
+// --- Profile & account management ---
+
+export interface ProfileUpdate {
+  name?: string;
+  bio?: string | null;
+  neighborhood?: string | null;
+  phoneNumber?: string | null;
+  image?: string | null;
+}
+
+export function updateProfile(userId: string, patch: ProfileUpdate): UserModel {
+  const user = memoryStore.users.get(userId);
+  if (!user) throw new Error('Account not found.');
+  const clean = (v: string | null | undefined, max: number) => (v == null ? null : v.trim().slice(0, max) || null);
+  const next = { ...user, updatedAt: new Date() };
+  if (patch.name !== undefined) {
+    const name = patch.name.trim();
+    if (name.length < 2 || name.length > 80) throw new Error('Please enter your name (2–80 characters).');
+    next.name = name;
+  }
+  if (patch.bio !== undefined) next.bio = clean(patch.bio, 500);
+  if (patch.neighborhood !== undefined) next.neighborhood = clean(patch.neighborhood, 150);
+  if (patch.phoneNumber !== undefined) {
+    const phone = clean(patch.phoneNumber, 30);
+    if (phone && !/^[+\d][\d\s()-]{6,}$/.test(phone)) throw new Error('Please enter a valid phone number.');
+    next.phoneNumber = phone;
+  }
+  if (patch.image !== undefined) {
+    const image = patch.image?.trim() || null;
+    if (image && !/^(https:\/\/|data:image\/(jpeg|png|webp);base64,)/.test(image)) throw new Error('That profile photo is not valid.');
+    if (image && image.length > 1_500_000) throw new Error('That profile photo is too large.');
+    next.image = image;
+  }
+  memoryStore.users.set(userId, next);
+  return toUserModel(next);
+}
+
+/** Changes the password and signs out every other session. */
+export async function changePassword(userId: string, currentPassword: string, newPassword: string, keepToken?: string | null) {
+  const user = memoryStore.users.get(userId);
+  if (!user) throw new Error('Account not found.');
+  if (newPassword.length < MIN_PASSWORD_LENGTH || newPassword.length > 200) {
+    throw new Error(`Your new password needs at least ${MIN_PASSWORD_LENGTH} characters.`);
+  }
+  const credential = credentialFor(userId);
+  if (credential?.password && !(await verifyPassword(currentPassword, credential.password))) {
+    throw new Error('Your current password is incorrect.');
+  }
+  const now = new Date();
+  const hash = await hashPassword(newPassword);
+  if (credential) {
+    memoryStore.accounts.set(credential.id, { ...credential, password: hash, updatedAt: now });
+  } else {
+    const id = newId('acct');
+    memoryStore.accounts.set(id, {
+      id, accountId: userId, providerId: CREDENTIAL_PROVIDER, userId,
+      accessToken: null, refreshToken: null, idToken: null, accessTokenExpiresAt: null, refreshTokenExpiresAt: null, scope: null,
+      password: hash, createdAt: now, updatedAt: now,
+    });
+  }
+  const keep = keepToken ? hashToken(keepToken) : null;
+  for (const [id, session] of memoryStore.sessions) {
+    if (session.userId === userId && session.token !== keep) memoryStore.sessions.delete(id);
+  }
+}
+
+// --- Admin: member management ---
+
+/** Roles an admin can grant in the app. ADMIN itself comes only from ADMIN_EMAILS. */
+export function setUserRole(userId: string, role: 'USER' | 'VERIFIED_HOST') {
+  const user = memoryStore.users.get(userId);
+  if (!user) throw new Error('Member not found.');
+  memoryStore.users.set(userId, { ...user, role, updatedAt: new Date() });
+  return toUserModel(memoryStore.users.get(userId)!);
+}
+
+/** Suspending signs the member out everywhere and hides their listings. */
+export function setUserSuspended(userId: string, suspended: boolean, actorId: string) {
+  const user = memoryStore.users.get(userId);
+  if (!user) throw new Error('Member not found.');
+  if (userId === actorId) throw new Error('You cannot suspend your own account.');
+  memoryStore.users.set(userId, { ...user, suspendedAt: suspended ? new Date() : null, updatedAt: new Date() });
+  if (suspended) {
+    for (const [id, session] of memoryStore.sessions) if (session.userId === userId) memoryStore.sessions.delete(id);
+  }
+  return toUserModel(memoryStore.users.get(userId)!);
+}
+
+/** Ensures a designated administrator exists with the required credentials. */
+export async function ensureAdminUser(email: string, password: string, name = 'Admin'): Promise<UserModel> {
+  const cleanEmail = normalizeEmail(email);
+  let user = findUserByEmail(cleanEmail);
+  const now = new Date();
+  const hash = await hashPassword(password);
+
+  if (!user) {
+    user = {
+      id: newId('usr'),
       name,
-      email: email.toLowerCase().trim(),
+      email: cleanEmail,
       emailVerified: true,
-      role,
-      image: `https://images.unsplash.com/photo-${1534528741775 + (Math.floor(Math.random() * 1000))}?w=150&auto=format&fit=crop&q=80`,
-      phoneNumber: '+27 82 ' + Math.floor(100 + Math.random() * 900) + ' ' + Math.floor(1000 + Math.random() * 9000),
-      bio: role === 'VERIFIED_HOST' ? 'Verified Community Host & Equipment Owner' : 'Community Member',
-      neighborhood,
-      trustScore: role === 'ADMIN' ? 100 : role === 'VERIFIED_HOST' ? 98 : 90,
-      isHost: role === 'VERIFIED_HOST' || role === 'ADMIN' || isHost,
+      role: 'ADMIN',
+      image: null,
+      phoneNumber: null,
+      bio: null,
+      neighborhood: null,
+      trustScore: 100,
+      isHost: false,
+      suspendedAt: null,
       createdAt: now,
       updatedAt: now,
     };
+    memoryStore.users.set(user.id, user);
 
-    // Store in memoryStore and attempt Neon insertion if available
-    memoryStore.users.set(userId, newUserRecord);
-
-    // Record audit event in SystemLogs
-    const logId = `sys_auth_${Date.now()}`;
-    const systemLog: schema.SystemLog = {
-      id: logId,
-      eventType: 'AUTH_SIGNUP',
-      userId,
-      targetId: userId,
-      metadata: {
-        method: 'EMAIL_PASSWORD',
-        role,
-        email: newUserRecord.email,
-        name: newUserRecord.name,
-      },
+    const accountId = newId('acct');
+    memoryStore.accounts.set(accountId, {
+      id: accountId,
+      accountId: user.id,
+      providerId: CREDENTIAL_PROVIDER,
+      userId: user.id,
+      accessToken: null,
+      refreshToken: null,
+      idToken: null,
+      accessTokenExpiresAt: null,
+      refreshTokenExpiresAt: null,
+      scope: null,
+      password: hash,
       createdAt: now,
-    };
-    memoryStore.systemLogs.set(logId, systemLog);
-
-    const token = `sess_token_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
-
-    const userModel: UserModel = {
-      ...newUserRecord,
-      createdAt: newUserRecord.createdAt.toISOString(),
-      updatedAt: newUserRecord.updatedAt.toISOString(),
-    };
-
-    return {
-      success: true,
-      session: {
-        user: userModel,
-        token,
-        expiresAt,
-      },
-    };
-  } catch (error: any) {
-    console.error('Error in signUpWithEmailPassword:', error);
-    return { success: false, error: error.message || 'Failed to create user account' };
-  }
-}
-
-/**
- * Sign in existing user with email and password
- */
-export async function signInWithEmailPassword(
-  params: SignInParams
-): Promise<{ success: boolean; session?: AuthSession; error?: string }> {
-  try {
-    const { email } = params;
-    const cleanEmail = email.toLowerCase().trim();
-
-    // Check predefined demo accounts first
-    for (const demoRole of Object.keys(DEMO_ACCOUNTS) as UserRole[]) {
-      const demoUser = DEMO_ACCOUNTS[demoRole];
-      if (demoUser.email.toLowerCase() === cleanEmail) {
-        return createSessionForUser(demoUser);
-      }
+      updatedAt: now,
+    });
+  } else {
+    // Ensure role and updated password
+    memoryStore.users.set(user.id, { ...user, role: 'ADMIN', updatedAt: now });
+    const credential = credentialFor(user.id);
+    if (credential) {
+      memoryStore.accounts.set(credential.id, { ...credential, password: hash, updatedAt: now });
+    } else {
+      const accountId = newId('acct');
+      memoryStore.accounts.set(accountId, {
+        id: accountId,
+        accountId: user.id,
+        providerId: CREDENTIAL_PROVIDER,
+        userId: user.id,
+        accessToken: null,
+        refreshToken: null,
+        idToken: null,
+        accessTokenExpiresAt: null,
+        refreshTokenExpiresAt: null,
+        scope: null,
+        password: hash,
+        createdAt: now,
+        updatedAt: now,
+      });
     }
-
-    // Check memoryStore
-    for (const user of memoryStore.users.values()) {
-      if (user.email.toLowerCase() === cleanEmail) {
-        const userModel: UserModel = {
-          ...user,
-          createdAt: user.createdAt.toISOString(),
-          updatedAt: user.updatedAt.toISOString(),
-        };
-        return createSessionForUser(userModel);
-      }
-    }
-
-    // Fallback: If user enters any email, create and log them in dynamically
-    const fallbackUser: UserModel = {
-      id: `usr_${Date.now()}`,
-      name: cleanEmail.split('@')[0].replace('.', ' ').replace(/^./, (str) => str.toUpperCase()),
-      email: cleanEmail,
-      emailVerified: true,
-      role: cleanEmail.includes('admin') ? 'ADMIN' : cleanEmail.includes('host') ? 'VERIFIED_HOST' : 'USER',
-      image: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80',
-      trustScore: 92,
-      isHost: cleanEmail.includes('host') || cleanEmail.includes('admin'),
-      neighborhood: 'City Bowl / Gardens',
-      bio: 'ShareHub Community Member',
-    };
-
-    return createSessionForUser(fallbackUser);
-  } catch (error: any) {
-    console.error('Error in signInWithEmailPassword:', error);
-    return { success: false, error: error.message || 'Authentication failed' };
   }
+
+  return toUserModel(user);
 }
 
-/**
- * Google OAuth Provider Action
- */
-export async function signInWithGoogleOAuth(
-  rolePreference: UserRole = 'USER'
-): Promise<{ success: boolean; session?: AuthSession; error?: string }> {
-  try {
-    const googleUser: UserModel = {
-      id: `usr_google_${Date.now()}`,
-      name: 'Elena Rostova',
-      email: 'elena.rostova@gmail.com',
-      emailVerified: true,
-      role: rolePreference,
-      image: 'https://images.unsplash.com/photo-1544005313-94ddf0286df2?w=150&auto=format&fit=crop&q=80',
-      phoneNumber: '+27 82 901 3344',
-      bio: 'Eco-living advocate, photographer & maker.',
-      neighborhood: 'Camps Bay / Atlantic Seaboard',
-      trustScore: 99,
-      isHost: rolePreference === 'VERIFIED_HOST' || rolePreference === 'ADMIN',
-    };
-
-    return createSessionForUser(googleUser, 'GOOGLE_OAUTH');
-  } catch (error: any) {
-    console.error('Error in signInWithGoogleOAuth:', error);
-    return { success: false, error: 'Google OAuth authentication failed.' };
-  }
-}
-
-/**
- * Helper to construct and log session
- */
-function createSessionForUser(
-  user: UserModel,
-  authProvider: string = 'EMAIL_PASSWORD'
-): { success: boolean; session: AuthSession } {
-  const token = `sess_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-  const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
-
-  // Audit log to SystemLogs
-  const logId = `sys_auth_${Date.now()}`;
-  const systemLog: schema.SystemLog = {
-    id: logId,
-    eventType: 'AUTH_SIGNIN',
-    userId: user.id,
-    targetId: user.id,
-    metadata: {
-      provider: authProvider,
-      role: user.role,
-      email: user.email,
-      timestamp: new Date().toISOString(),
-    },
-    createdAt: new Date(),
-  };
-  memoryStore.systemLogs.set(logId, systemLog);
-
-  return {
-    success: true,
-    session: {
-      user,
-      token,
-      expiresAt,
-    },
-  };
-}

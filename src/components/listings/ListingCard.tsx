@@ -21,7 +21,6 @@ export interface ListingCardProps {
   listing: ListingModel;
   selectedTier?: PricingTierModel;
   onSelect?: (listing: ListingModel) => void;
-  onQuickSubscribe?: (listing: ListingModel, tier: PricingTierModel) => void;
   isSubscribed?: boolean;
 }
 
@@ -29,7 +28,6 @@ export const ListingCard: React.FC<ListingCardProps> = ({
   listing,
   selectedTier,
   onSelect,
-  onQuickSubscribe,
   isSubscribed = false,
 }) => {
   const [currentImgIndex, setCurrentImgIndex] = useState(0);
@@ -64,7 +62,7 @@ export const ListingCard: React.FC<ListingCardProps> = ({
 
     if (primaryTier.type === 'monthly_subscription') {
       const usesText = primaryTier.usageLimitPerPeriod
-        ? `${primaryTier.usageLimitPerPeriod} uses`
+        ? `${primaryTier.usageLimitPerPeriod} turns/mo`
         : 'unlimited';
       return (
         <div className="flex flex-col items-end">
@@ -121,7 +119,7 @@ export const ListingCard: React.FC<ListingCardProps> = ({
         <span className="text-lg font-bold text-slate-900">{priceText}</span>
         {primaryTier.usageLimitPerPeriod && (
           <span className="text-[11px] text-slate-500">
-            {primaryTier.usageLimitPerPeriod} uses pack
+            {primaryTier.usageLimitPerPeriod} turns
           </span>
         )}
       </div>
@@ -136,12 +134,21 @@ export const ListingCard: React.FC<ListingCardProps> = ({
     <div
       id={`listing-card-${listing.id}`}
       onClick={() => onSelect?.(listing)}
-      className="group relative flex flex-col bg-white rounded-2xl border border-slate-200/80 hover:border-slate-300 shadow-2xs hover:shadow-md transition-all duration-200 overflow-hidden cursor-pointer"
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onSelect?.(listing);
+        }
+      }}
+      role="button"
+      tabIndex={0}
+      aria-label={listing.title}
+      className="group relative flex flex-col focus-visible:outline-2 focus-visible:outline-indigo-500 bg-white rounded-2xl border border-slate-200/80 hover:border-slate-300 shadow-2xs hover:shadow-md transition-all duration-200 overflow-hidden cursor-pointer"
     >
       {/* Image Carousel & Badges Container */}
       <div className="relative aspect-[4/3] w-full overflow-hidden bg-slate-100">
         <img
-          src={listing.images[currentImgIndex] || 'https://images.unsplash.com/photo-1582735689369-4fe89db7114c?w=800'}
+          src={listing.images[currentImgIndex] || listing.images[0]}
           alt={listing.title}
           loading="lazy"
           decoding="async"
@@ -194,7 +201,7 @@ export const ListingCard: React.FC<ListingCardProps> = ({
         <div className="absolute top-3 left-3 flex flex-wrap gap-1.5 max-w-[75%]">
           {listing.visibilityGroupName && (
             <span
-              title={`Private Trust Group: ${listing.visibilityGroupName}`}
+              title={`Only for members of ${listing.visibilityGroupName}`}
               className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-emerald-950/90 text-emerald-300 text-xs font-semibold shadow-sm border border-emerald-500/40 backdrop-blur-xs"
             >
               <Lock className="w-3 h-3 text-emerald-400" />
@@ -204,26 +211,26 @@ export const ListingCard: React.FC<ListingCardProps> = ({
           {listing.category === 'room' && (
             <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-white/95 backdrop-blur-xs text-xs font-semibold text-sky-900 shadow-2xs border border-slate-200/80">
               <BedDouble className="w-3.5 h-3.5 text-sky-600" />
-              Room Stay
+              Space
             </span>
           )}
           {listing.category === 'physical_item' && (
             <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-white/95 backdrop-blur-xs text-xs font-semibold text-amber-900 shadow-2xs border border-slate-200/80">
               <Wrench className="w-3.5 h-3.5 text-amber-600" />
-              Equipment Rental
+              Tools & gear
             </span>
           )}
           {listing.category === 'fractional_appliance' && (
             <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-slate-900 text-white text-xs font-semibold shadow-2xs border border-slate-800">
               <Zap className="w-3.5 h-3.5 text-amber-300" />
-              Fractional Co-Op
+              Shared appliance
             </span>
           )}
 
           {isSubscribed && (
             <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-emerald-700 text-white text-xs font-semibold shadow-2xs">
               <CheckCircle2 className="w-3.5 h-3.5" />
-              Subscribed
+              You're a member
             </span>
           )}
         </div>
@@ -233,7 +240,7 @@ export const ListingCard: React.FC<ListingCardProps> = ({
           <div className="absolute top-3 right-3">
             <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-white/95 backdrop-blur-xs text-[11px] font-semibold text-slate-700 shadow-2xs border border-slate-200/80">
               <ShieldCheck className="w-3.5 h-3.5 text-indigo-600" />
-              Verified Host
+              Verified host
             </span>
           </div>
         )}
@@ -253,7 +260,7 @@ export const ListingCard: React.FC<ListingCardProps> = ({
               {/* Distance Proximity Badge */}
               {listing.formattedDistance && (
                 <span
-                  title="Approximate distance to protect host home privacy until booking is confirmed"
+                  title="Approximate distance. The exact address is shared after booking."
                   className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200/80"
                 >
                   <ShieldCheck className="w-2.5 h-2.5 text-emerald-600" />
@@ -261,11 +268,17 @@ export const ListingCard: React.FC<ListingCardProps> = ({
                 </span>
               )}
 
-              <div className="flex items-center gap-1 font-semibold text-slate-800">
-                <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
-                <span>{listing.rating.toFixed(2)}</span>
-                <span className="text-slate-400 font-normal">({listing.reviewCount})</span>
-              </div>
+              {listing.rating !== undefined && listing.reviewCount ? (
+                <div className="flex items-center gap-1 font-semibold text-slate-800">
+                  <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
+                  <span>{listing.rating.toFixed(2)}</span>
+                  <span className="text-slate-400 font-normal">({listing.reviewCount})</span>
+                </div>
+              ) : (
+                <span className="inline-flex items-center gap-1 font-semibold text-indigo-700">
+                  <Sparkles className="w-3 h-3" /> New
+                </span>
+              )}
             </div>
           </div>
 
@@ -285,7 +298,7 @@ export const ListingCard: React.FC<ListingCardProps> = ({
               <div className="flex items-center justify-between text-[11px] font-medium mb-1.5">
                 <span className="text-slate-600 flex items-center gap-1">
                   <Users className="w-3 h-3 text-slate-400" />
-                  Subscriber Co-Op Cap
+                  Households sharing
                 </span>
                 <span
                   className={cn(
@@ -293,7 +306,7 @@ export const ListingCard: React.FC<ListingCardProps> = ({
                     isFull ? 'text-rose-600' : 'text-slate-800'
                   )}
                 >
-                  {listing.currentSubscribersCount}/{listing.maxSubscribers} filled
+                  {listing.currentSubscribersCount} of {listing.maxSubscribers}
                 </span>
               </div>
               <div className="w-full h-1.5 rounded-full bg-slate-200 overflow-hidden flex">
@@ -303,13 +316,12 @@ export const ListingCard: React.FC<ListingCardProps> = ({
                     isFull ? 'bg-rose-500' : 'bg-slate-900'
                   )}
                   style={{
-                    width: `${(listing.currentSubscribersCount / listing.maxSubscribers) * 100}%`,
+                    width: `${Math.min(100, (listing.currentSubscribersCount / Math.max(1, listing.maxSubscribers)) * 100)}%`,
                   }}
                 />
               </div>
-              <div className="mt-1.5 flex items-center justify-between text-[10px] text-slate-500">
-                <span>{slotsRemaining > 0 ? `${slotsRemaining} slot remaining` : 'Waitlist only'}</span>
-                <span className="text-slate-700 font-medium">Zero-Queue Guarantee</span>
+              <div className="mt-1.5 text-[10px] text-slate-500">
+                {slotsRemaining > 0 ? `${slotsRemaining} ${slotsRemaining === 1 ? 'spot' : 'spots'} left` : 'Full right now'}
               </div>
             </div>
           )}
@@ -320,7 +332,7 @@ export const ListingCard: React.FC<ListingCardProps> = ({
           <div className="flex items-center gap-2">
             <img
               src={listing.owner.image}
-              alt={listing.owner.name}
+              alt=""
               referrerPolicy="no-referrer"
               className="w-7.5 h-7.5 rounded-full object-cover border border-slate-200"
             />
@@ -329,7 +341,7 @@ export const ListingCard: React.FC<ListingCardProps> = ({
                 {listing.owner.name}
               </span>
               <span className="text-[10px] text-slate-400 leading-none">
-                Trust {listing.owner.trustScore}%
+                {listing.owner.trustScore}% trust score
               </span>
             </div>
           </div>

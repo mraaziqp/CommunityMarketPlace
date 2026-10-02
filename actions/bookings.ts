@@ -1,133 +1,125 @@
-'use server';
-
 import { db, memoryStore } from '../db';
-import {
-  bookings,
-  systemLogs,
-  type Booking,
-  type SystemLog,
-} from '../db/schema';
-import { eq, and, or, sql } from 'drizzle-orm';
-import { captureEscrow } from './payments';
-import {
-  validateInput,
-  ConfirmHandoverSchema,
-  CreateBookingSchema,
-  CreateBookingInputValidated,
-} from '../lib/validations';
+import type { Booking, SystemLog } from '../db/schema';
+import { validateInput, ConfirmHandoverSchema, CreateBookingSchema } from '../lib/validations';
 
-export interface ConfirmHandoverResult {
-  success: boolean;
-  booking: {
-    id: string;
-    listingId: string;
-    renterId: string;
-    status: string;
-    verificationCode: string;
-    handoverCompletedAt: string;
-    totalAmountInCents: number;
-    depositAmountInCents: number;
-    startDate: string;
-    endDate: string;
-  };
-  escrowCaptured?: boolean;
-  systemLog: {
-    id: string;
-    eventType: string;
-    userId: string;
-    targetId: string;
-    metadata: Record<string, unknown>;
-    createdAt: string;
+export interface BookingSummary {
+  id: string;
+  listingId: string;
+  renterId: string;
+  status: string;
+  verificationCode: string;
+  totalAmountInCents: number;
+  depositAmountInCents: number;
+  startDate: string;
+  endDate: string;
+  handoverCompletedAt: string | null;
+}
+
+const HOUR_MS = 60 * 60 * 1000;
+const UNIT_MS: Record<string, number> = {
+  hourly: HOUR_MS,
+  daily: 24 * HOUR_MS,
+  nightly: 24 * HOUR_MS,
+};
+
+/** Statuses that hold a listing's calendar. Unpaid bookings only hold it briefly. */
+const BLOCKING_STATUSES = ['PENDING_PAYMENT', 'PENDING_HANDOVER', 'ACTIVE'];
+const UNPAID_HOLD_MS = 30 * 60 * 1000;
+
+function blocksCalendar(b: Booking) {
+  if (!BLOCKING_STATUSES.includes(b.status)) return false;
+  return b.status !== 'PENDING_PAYMENT' || Date.now() - b.createdAt.getTime() < UNPAID_HOLD_MS;
+}
+
+function newId(prefix: string) {
+  return `${prefix}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+}
+
+function toSummary(b: Booking): BookingSummary {
+  return {
+    id: b.id,
+    listingId: b.listingId,
+    renterId: b.renterId,
+    status: b.status,
+    verificationCode: b.verificationCode,
+    totalAmountInCents: b.totalAmountInCents,
+    depositAmountInCents: b.depositAmountInCents,
+    startDate: b.startDate.toISOString(),
+    endDate: b.endDate.toISOString(),
+    handoverCompletedAt: b.handoverCompletedAt ? b.handoverCompletedAt.toISOString() : null,
   };
 }
 
-export interface CreateBookingResult {
-  success: boolean;
-  booking: {
-    id: string;
-    listingId: string;
-    renterId: string;
-    status: string;
-    verificationCode: string;
-    totalAmountInCents: number;
-    depositAmountInCents: number;
-    startDate: string;
-    endDate: string;
-  };
-  systemLog: {
-    id: string;
-    eventType: string;
-    userId: string;
-    targetId: string;
-    metadata: Record<string, unknown>;
-    createdAt: string;
-  };
+/** Number of billable units (hours, days or nights) between two dates for a rate type. */
+export function billableUnits(tierType: string, start: Date, end: Date): number {
+  const unit = UNIT_MS[tierType];
+  if (!unit) return 0;
+  return Math.max(1, Math.ceil((end.getTime() - start.getTime()) / unit));
 }
 
 /**
- * Server Action: Create a Booking with Overlap Conflict Guard
- *
- * Implements strict exclusion checks to prevent double-booking collisions:
- * Checks whether any ACTIVE, PENDING_HANDOVER, or PENDING_PAYMENT booking overlaps
- * with the requested start and end dates.
+ * Reserve a listing for a date range. The booking waits for payment (see
+ * payments.ts) and holds the dates for 30 minutes meanwhile. The price is
+ * always worked out here from the listing's own rate, never taken from the
+ * caller.
  */
 export async function createBooking(input: {
   listingId: string;
   renterId: string;
-  pricingTierId?: string | null;
+  pricingTierId: string;
   startDate: string | Date;
   endDate: string | Date;
-  totalAmountInCents: number;
-  depositAmountInCents?: number;
-  verificationCode?: string;
-}): Promise<CreateBookingResult> {
-  // 1. Strict Zod Schema Validation
+}): Promise<{ success: true; booking: BookingSummary }> {
   const validated = validateInput(CreateBookingSchema, input);
-
   const start = new Date(validated.startDate);
   const end = new Date(validated.endDate);
 
-  if (end <= start) {
-    throw new Error('Invalid Date Range: End date must be strictly after start date.');
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+    throw new Error('Please choose valid dates.');
   }
+  if (end <= start) throw new Error('The end of your booking must be after the start.');
+  if (start.getTime() < Date.now() - HOUR_MS) throw new Error('Please choose a start time in the future.');
 
-  return await db.transaction(async (tx: any) => {
-    // 2. Overlap Exclusion Constraint Check (Double-Booking Prevention)
-    const activeBookingStatuses = ['PENDING_HANDOVER', 'ACTIVE', 'PENDING_PAYMENT'];
-    
-    // Check in-memory store
+  return await db.transaction(async () => {
+    const renter = memoryStore.users.get(validated.renterId);
+    if (!renter) throw new Error('Please sign in to book.');
+
+    const listing = memoryStore.listings.get(validated.listingId);
+    if (!listing || !listing.isAvailable) throw new Error('This listing is no longer available.');
+    if (listing.ownerId === renter.id) throw new Error("You can't book your own listing.");
+
+    if (listing.visibilityGroupId) {
+      const isMember = Array.from(memoryStore.groupMemberships.values()).some(
+        (m) => m.groupId === listing.visibilityGroupId && m.userId === renter.id && m.status === 'ACTIVE'
+      );
+      if (!isMember) throw new Error('This listing is only available to members of its circle.');
+    }
+
+    const tier = memoryStore.pricingTiers.get(validated.pricingTierId);
+    if (!tier || tier.listingId !== listing.id || !tier.isActive || !UNIT_MS[tier.type]) {
+      throw new Error('That rate is no longer offered. Please pick another.');
+    }
+
     for (const existing of memoryStore.bookings.values()) {
-      if (
-        existing.listingId === validated.listingId &&
-        activeBookingStatuses.includes(existing.status)
-      ) {
-        const existingStart = new Date(existing.startDate);
-        const existingEnd = new Date(existing.endDate);
-
-        // Check date interval overlap: (start1 < end2) && (end1 > start2)
-        if (start < existingEnd && end > existingStart) {
-          throw new Error(
-            `Booking Conflict: Asset '${validated.listingId}' is already reserved between ${existingStart.toLocaleDateString()} and ${existingEnd.toLocaleDateString()}. Please choose different dates.`
-          );
-        }
+      if (existing.listingId !== listing.id || !blocksCalendar(existing)) continue;
+      if (start < existing.endDate && end > existing.startDate) {
+        throw new Error(
+          `Those dates overlap another booking (${existing.startDate.toLocaleDateString()} – ${existing.endDate.toLocaleDateString()}). Please choose different dates.`
+        );
       }
     }
 
-    const bookingId = `book_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-    const pin = validated.verificationCode || `HANDOVER-${Math.floor(1000 + Math.random() * 9000)}`;
-    const systemLogId = `sys_log_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
     const now = new Date();
-
-    const newBooking: Booking = {
-      id: bookingId,
-      listingId: validated.listingId,
-      renterId: validated.renterId,
-      pricingTierId: validated.pricingTierId || null,
-      status: 'PENDING_HANDOVER',
+    const booking: Booking = {
+      id: newId('book'),
+      listingId: listing.id,
+      renterId: renter.id,
+      pricingTierId: tier.id,
+      status: 'PENDING_PAYMENT',
       disputeStatus: 'NONE',
-      verificationCode: pin,
-      totalAmountInCents: validated.totalAmountInCents,
-      depositAmountInCents: validated.depositAmountInCents || 0,
+      verificationCode: `PICKUP-${Math.floor(1000 + Math.random() * 9000)}`,
+      totalAmountInCents: billableUnits(tier.type, start, end) * tier.priceInCents,
+      depositAmountInCents: listing.depositRequiredInCents,
       startDate: start,
       endDate: end,
       handoverCompletedAt: null,
@@ -136,206 +128,83 @@ export async function createBooking(input: {
       createdAt: now,
       updatedAt: now,
     };
+    memoryStore.bookings.set(booking.id, booking);
 
-    memoryStore.bookings.set(bookingId, newBooking);
-
-    // Audit log
-    const systemLogRecord: SystemLog = {
-      id: systemLogId,
+    const logId = newId('sys_log');
+    memoryStore.systemLogs.set(logId, {
+      id: logId,
       eventType: 'BOOKING_CREATED',
-      userId: validated.renterId,
-      targetId: bookingId,
+      userId: renter.id,
+      targetId: booking.id,
       metadata: {
-        action: 'RESERVATION_CREATED_WITH_OVERLAP_GUARD',
-        bookingId,
-        listingId: validated.listingId,
-        renterId: validated.renterId,
-        totalAmountInCents: validated.totalAmountInCents,
-        depositAmountInCents: validated.depositAmountInCents,
-        rentalWindow: {
-          start: start.toISOString(),
-          end: end.toISOString(),
-        },
+        listingId: listing.id,
+        listingTitle: listing.title,
+        startDate: start.toISOString(),
+        endDate: end.toISOString(),
+        totalAmountInCents: booking.totalAmountInCents,
       },
       createdAt: now,
-    };
-    memoryStore.systemLogs.set(systemLogId, systemLogRecord);
+    });
 
-    return {
-      success: true,
-      booking: {
-        id: newBooking.id,
-        listingId: newBooking.listingId,
-        renterId: newBooking.renterId,
-        status: newBooking.status,
-        verificationCode: newBooking.verificationCode,
-        totalAmountInCents: newBooking.totalAmountInCents,
-        depositAmountInCents: newBooking.depositAmountInCents,
-        startDate: newBooking.startDate.toISOString(),
-        endDate: newBooking.endDate.toISOString(),
-      },
-      systemLog: {
-        id: systemLogRecord.id,
-        eventType: systemLogRecord.eventType,
-        userId: systemLogRecord.userId,
-        targetId: systemLogRecord.targetId,
-        metadata: systemLogRecord.metadata,
-        createdAt: systemLogRecord.createdAt.toISOString(),
-      },
-    };
+    return { success: true as const, booking: toSummary(booking) };
   });
 }
 
 /**
- * Server Action: Digital Handover State Machine
- *
- * Transitions a physical rental booking from "PENDING_HANDOVER" to "ACTIVE".
- * Validates the digital handover PIN / QR token, stamps the exact moment liability
- * transfers to the renter, and writes an immutable audit event to `SystemLogs`.
+ * Pickup: the renter enters the code the host gives them when they collect
+ * the item. That moves the booking from PENDING_HANDOVER to ACTIVE. The
+ * payment stays held until the host checks the item back in.
  */
 export async function confirmHandover(
   bookingId: string,
-  scannedCode: string,
-  userId?: string
-): Promise<ConfirmHandoverResult> {
-  // 1. Zod Validation
+  enteredCode: string,
+  userId: string
+): Promise<{ success: true; booking: BookingSummary }> {
   const validated = validateInput(ConfirmHandoverSchema, {
     bookingId,
-    scannedCode,
+    scannedCode: enteredCode,
     userId,
   });
 
-  const normalizedInputCode = validated.scannedCode.trim().toUpperCase();
+  return await db.transaction(async () => {
+    const booking = memoryStore.bookings.get(validated.bookingId);
+    if (!booking || booking.renterId !== validated.userId) {
+      throw new Error("We couldn't find that booking on your account.");
+    }
+    if (booking.status === 'ACTIVE') throw new Error('Pickup has already been confirmed for this booking.');
+    if (booking.status !== 'PENDING_HANDOVER') throw new Error('This booking is not waiting for pickup.');
 
-  // 2. Execute inside an atomic Drizzle database transaction
-  return await db.transaction(async (tx: any) => {
-    let booking: Booking | null = null;
-
-    if (memoryStore.bookings.has(validated.bookingId)) {
-      booking = memoryStore.bookings.get(validated.bookingId) || null;
+    const payment = Array.from(memoryStore.payments.values()).find((p) => p.bookingId === booking.id);
+    if (!payment || payment.status !== 'HELD_IN_ESCROW') {
+      throw new Error('Please complete payment before collecting the item.');
     }
 
-    if (!booking && tx.query?.bookings) {
-      booking = await tx.query.bookings.findFirst({
-        where: eq(bookings.id, validated.bookingId),
-      });
+    if (validated.scannedCode.trim().toUpperCase() !== booking.verificationCode.trim().toUpperCase()) {
+      throw new Error("That code doesn't match. Please check it with your host.");
     }
 
-    if (!booking) {
-      // Find fallback for testing
-      for (const b of memoryStore.bookings.values()) {
-        if (b.id === validated.bookingId) {
-          booking = b;
-          break;
-        }
-      }
-    }
-
-    if (!booking) {
-      throw new Error(`Handover Failed: Booking '${validated.bookingId}' not found.`);
-    }
-
-    // Check current state machine status
-    if (booking.status === 'ACTIVE') {
-      throw new Error(
-        `Invalid State Transition: Booking '${validated.bookingId}' is already ACTIVE. Handover was completed at ${booking.handoverCompletedAt ? new Date(booking.handoverCompletedAt).toLocaleString() : 'earlier'}.`
-      );
-    }
-
-    if (booking.status !== 'PENDING_HANDOVER') {
-      throw new Error(
-        `Invalid State Transition: Cannot confirm handover for a booking with status '${booking.status}'. Expected status 'PENDING_HANDOVER'.`
-      );
-    }
-
-    // Verify digital verification code (PIN or QR code scan)
-    const expectedCode = booking.verificationCode.trim().toUpperCase();
-    const isCodeValid =
-      normalizedInputCode === expectedCode ||
-      normalizedInputCode === 'MASTER_BYPASS' ||
-      normalizedInputCode.includes(expectedCode) ||
-      expectedCode.includes(normalizedInputCode);
-
-    if (!isCodeValid) {
-      throw new Error(
-        `Handover Authentication Failed: Scanned code '${validated.scannedCode}' does not match the active digital handover token for this booking.`
-      );
-    }
-
-    const handoverTimestamp = new Date();
-    const systemLogId = `sys_log_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-
-    // State Transition: PENDING_HANDOVER -> ACTIVE
-    const updatedBooking: Booking = {
+    const now = new Date();
+    const updated: Booking = {
       ...booking,
       status: 'ACTIVE',
-      handoverCompletedAt: handoverTimestamp,
-      handoverNotes: `Digital QR/PIN handover verified (${normalizedInputCode}). Liability transferred.`,
-      updatedAt: handoverTimestamp,
+      handoverCompletedAt: now,
+      handoverNotes: 'Pickup confirmed with host code.',
+      updatedAt: now,
     };
-    memoryStore.bookings.set(validated.bookingId, updatedBooking);
+    memoryStore.bookings.set(booking.id, updated);
 
-    // Insert immutable liability transfer audit log into SystemLogs
-    const systemLogRecord: SystemLog = {
-      id: systemLogId,
+    const listing = memoryStore.listings.get(booking.listingId);
+    const log: SystemLog = {
+      id: newId('sys_log'),
       eventType: 'HANDOVER_COMPLETED',
-      userId: validated.userId || booking.renterId,
+      userId: booking.renterId,
       targetId: booking.id,
-      metadata: {
-        action: 'DIGITAL_HANDOVER_CONFIRMED',
-        previousState: 'PENDING_HANDOVER',
-        newState: 'ACTIVE',
-        bookingId: booking.id,
-        listingId: booking.listingId,
-        renterId: booking.renterId,
-        verifiedByUserId: validated.userId || booking.renterId,
-        scannedCodeUsed: normalizedInputCode,
-        handoverCompletedAtIso: handoverTimestamp.toISOString(),
-        liabilityTransferTimestamp: handoverTimestamp.toISOString(),
-        depositAmountInCents: booking.depositAmountInCents,
-        totalRentalAmountInCents: booking.totalAmountInCents,
-        rentalWindow: {
-          start: booking.startDate.toISOString(),
-          end: booking.endDate.toISOString(),
-        },
-        auditNotice:
-          'Liability for the asset has legally transferred from host to renter at this exact timestamp.',
-      },
-      createdAt: handoverTimestamp,
+      metadata: { stage: 'pickup', listingId: booking.listingId, listingTitle: listing?.title },
+      createdAt: now,
     };
-    memoryStore.systemLogs.set(systemLogId, systemLogRecord);
+    memoryStore.systemLogs.set(log.id, log);
 
-    // Automatically capture Escrow funds now that physical asset liability is transferred
-    try {
-      await captureEscrow(validated.bookingId, validated.userId || booking.renterId);
-    } catch (escrowErr) {
-      console.warn('Escrow capture note:', escrowErr);
-    }
 
-    return {
-      success: true,
-      booking: {
-        id: updatedBooking.id,
-        listingId: updatedBooking.listingId,
-        renterId: updatedBooking.renterId,
-        status: updatedBooking.status,
-        verificationCode: updatedBooking.verificationCode,
-        handoverCompletedAt: handoverTimestamp.toISOString(),
-        totalAmountInCents: updatedBooking.totalAmountInCents,
-        depositAmountInCents: updatedBooking.depositAmountInCents,
-        startDate: updatedBooking.startDate.toISOString(),
-        endDate: updatedBooking.endDate.toISOString(),
-      },
-      escrowCaptured: true,
-      systemLog: {
-        id: systemLogRecord.id,
-        eventType: systemLogRecord.eventType,
-        userId: systemLogRecord.userId,
-        targetId: systemLogRecord.targetId,
-        metadata: systemLogRecord.metadata,
-        createdAt: systemLogRecord.createdAt.toISOString(),
-      },
-    };
+    return { success: true as const, booking: toSummary(updated) };
   });
 }
-

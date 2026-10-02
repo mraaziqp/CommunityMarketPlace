@@ -1,7 +1,6 @@
 import { relations } from 'drizzle-orm';
 import {
   boolean,
-  customType,
   index,
   integer,
   jsonb,
@@ -11,49 +10,6 @@ import {
   timestamp,
   varchar,
 } from 'drizzle-orm/pg-core';
-
-/**
- * ============================================================================
- * POSTGIS GEOMETRY POINT CUSTOM TYPE (SRID 4326)
- * Supports ST_DWithin, ST_Distance, and ST_MakePoint spatial queries on Neon
- * ============================================================================
- */
-export const pointGeometry = customType<{
-  data: { longitude: number; latitude: number } | string;
-  driverData: string;
-}>({
-  dataType() {
-    return 'geometry(Point, 4326)';
-  },
-  toDriver(value) {
-    if (typeof value === 'string') return value;
-    return `SRID=4326;POINT(${value.longitude} ${value.latitude})`;
-  },
-  fromDriver(value: string) {
-    if (!value) return { longitude: 0, latitude: 0 };
-    const match = value.match(/POINT\(([-\d\.]+)\s+([-\d\.]+)\)/i);
-    if (match) {
-      return { longitude: parseFloat(match[1]), latitude: parseFloat(match[2]) };
-    }
-    return { longitude: 0, latitude: 0 };
-  },
-});
-
-/**
- * ============================================================================
- * RAW SQL MIGRATION FOR NEON POSTGRESQL (POSTGIS EXTENSION)
- *
- * Execute in your Neon SQL console / migration runner:
- *
- * CREATE EXTENSION IF NOT EXISTS postgis;
- *
- * -- Spatial GIST index for fast O(log N) proximity search:
- * CREATE INDEX IF NOT EXISTS idx_listings_location_gist ON listings USING GIST (location);
- * CREATE INDEX IF NOT EXISTS idx_listings_category_id ON listings(category_id);
- * CREATE INDEX IF NOT EXISTS idx_categories_parent_id ON categories(parent_id);
- * CREATE INDEX IF NOT EXISTS idx_categories_slug ON categories(slug);
- * ============================================================================
- */
 
 /**
  * ============================================================================
@@ -89,6 +45,7 @@ export const periodUnitEnum = pgEnum('period_unit', [
 ]);
 
 export const subscriptionStatusEnum = pgEnum('subscription_status', [
+  'pending_payment',
   'active',
   'paused',
   'expired',
@@ -161,7 +118,14 @@ export const systemEventTypeEnum = pgEnum('system_event_type', [
   'GROUP_CREATED',
   'GROUP_JOINED',
   'CRON_EXECUTION_COMPLETED',
+  'PAYMENT_FAILED',
+  'SUBSCRIPTION_CANCELLED',
+  'DATA_IMPORTED',
 ]);
+
+/** 'test' is an admin-initiated payment used to verify the live gateway end to end. */
+export const paymentKindEnum = pgEnum('payment_kind', ['booking', 'subscription', 'test']);
+export const payoutStatusEnum = pgEnum('payout_status', ['none', 'due', 'done']);
 
 /**
  * ============================================================================
@@ -181,6 +145,8 @@ export const users = pgTable('user', {
   neighborhood: text('neighborhood'),
   trustScore: integer('trust_score').default(100).notNull(), // 0-100 trust rating
   isHost: boolean('is_host').default(false).notNull(),
+  /** Set by an admin; a suspended member cannot sign in and their listings are hidden. */
+  suspendedAt: timestamp('suspended_at'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
@@ -266,7 +232,6 @@ export const listings = pgTable('listings', {
   city: varchar('city', { length: 100 }).notNull(),
   latitude: text('latitude'),
   longitude: text('longitude'),
-  location: pointGeometry('location'), // PostGIS geometry(Point, 4326)
 
   // Media & Metadata
   images: text('images').array().notNull().default([]),
@@ -287,7 +252,6 @@ export const listings = pgTable('listings', {
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 }, (table) => [
-  index('idx_listings_location').using('gist', table.location),
   index('idx_listings_category_id').on(table.categoryId),
   index('idx_listings_owner_id').on(table.ownerId),
   index('idx_listings_visibility_group_id').on(table.visibilityGroupId),
@@ -362,10 +326,13 @@ export const userSubscriptions = pgTable('user_subscriptions', {
   cancelledAt: timestamp('cancelled_at'),
 
   stripeSubscriptionId: text('stripe_subscription_id'),
+  /** PayFast recurring-billing token, used to match renewal and cancellation notifications. */
+  gatewayToken: text('gateway_token'),
 
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 }, (table) => [
+  index('idx_user_subscriptions_gateway_token').on(table.gatewayToken),
   index('idx_user_subscriptions_user_status').on(table.userId, table.status),
   index('idx_user_subscriptions_listing_id').on(table.listingId),
   index('idx_user_subscriptions_pricing_tier_id').on(table.pricingTierId),
@@ -453,18 +420,30 @@ export const bookings = pgTable('bookings', {
  */
 export const payments = pgTable('payment', {
   id: text('id').primaryKey(),
-  bookingId: text('booking_id')
-    .notNull()
-    .references(() => bookings.id, { onDelete: 'cascade' }),
+  kind: paymentKindEnum('kind').default('booking').notNull(),
+  bookingId: text('booking_id').references(() => bookings.id, { onDelete: 'cascade' }),
+  subscriptionId: text('subscription_id').references(() => userSubscriptions.id, { onDelete: 'cascade' }),
+  payerId: text('payer_id').references(() => users.id, { onDelete: 'set null' }),
   amount: integer('amount').notNull(), // amount in cents (e.g. 15000 = R150.00)
   currency: text('currency').default('ZAR').notNull(),
   status: paymentStatusEnum('status').default('PENDING').notNull(), // PENDING | HELD_IN_ESCROW | CAPTURED | REFUNDED | FROZEN_ESCROW
-  paymentGatewayRef: text('payment_gateway_ref'), // Paystack reference or Stripe PaymentIntent ID
+  /** Gateway name, e.g. 'payfast'. */
+  provider: text('provider'),
+  /** The gateway's own id for this payment (PayFast pf_payment_id); unique so notifications are idempotent. */
+  paymentGatewayRef: text('payment_gateway_ref').unique(),
+  /** PayFast recurring token for monthly test payments (renewals arrive with it). */
+  gatewayToken: text('gateway_token'),
   escrowReleasedAt: timestamp('escrow_released_at'),
+  /** Money owed to the host once the rental is returned. Payouts happen outside the gateway. */
+  hostPayoutStatus: payoutStatusEnum('host_payout_status').default('none').notNull(),
+  hostPayoutInCents: integer('host_payout_in_cents').default(0).notNull(),
+  /** Deposit owed back to the renter once the rental is returned. */
+  depositRefundStatus: payoutStatusEnum('deposit_refund_status').default('none').notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 }, (table) => [
   index('idx_payments_booking_id').on(table.bookingId),
+  index('idx_payments_subscription_id').on(table.subscriptionId),
   index('idx_payments_status').on(table.status),
 ]);
 
