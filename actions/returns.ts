@@ -1,4 +1,3 @@
-'use server';
 
 import { db, memoryStore } from '../db';
 import {
@@ -225,7 +224,7 @@ export async function confirmReturn(
   conditionStatus: 'GOOD' | 'MINOR_WEAR' = 'GOOD',
   notes: string = 'Return inspection completed. Item received in expected condition.',
   imageUrls: string[] = [],
-  userId: string = 'usr_me'
+  userId: string
 ): Promise<ConfirmReturnResult> {
   if (!bookingId) {
     throw new Error('Invalid parameter: bookingId is required');
@@ -236,58 +235,39 @@ export async function confirmReturn(
     const conditionLogId = `cond_return_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
     const systemLogId = `sys_log_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
 
-    // 1. Fetch & Verify Booking
-    let booking = memoryStore.bookings.get(bookingId);
-    if (!booking) {
-      // Create or fallback for test environment
-      booking = {
-        id: bookingId,
-        listingId: 'list_drill_002',
-        renterId: userId,
-        pricingTierId: 'tier_drill_day',
-        status: 'ACTIVE',
-        disputeStatus: 'NONE',
-        verificationCode: 'RETURN-OK-88',
-        totalAmountInCents: 15000,
-        depositAmountInCents: 50000,
-        startDate: new Date(),
-        endDate: new Date(),
-        handoverCompletedAt: now,
-        handoverNotes: notes,
-        returnConditionLogId: conditionLogId,
-        createdAt: new Date(),
-        updatedAt: now,
-      };
-      memoryStore.bookings.set(bookingId, booking);
+    // 1. Only the listing's host can check an item back in, once it is out.
+    const stored = memoryStore.bookings.get(bookingId);
+    const listing = stored ? memoryStore.listings.get(stored.listingId) : undefined;
+    if (!stored || !listing || listing.ownerId !== userId) {
+      throw new Error("We couldn't find that booking for your listing.");
     }
+    if (stored.status !== 'ACTIVE') throw new Error('Only items that have been picked up can be checked back in.');
+    if (stored.disputeStatus === 'PENDING_REVIEW') throw new Error('This return is already under review.');
 
-    booking.status = 'COMPLETED';
-    booking.disputeStatus = 'NONE';
-    booking.handoverNotes = notes;
-    booking.returnConditionLogId = conditionLogId;
-    booking.updatedAt = now;
+    const booking = {
+      ...stored,
+      status: 'COMPLETED' as const,
+      disputeStatus: 'NONE' as const,
+      handoverNotes: notes,
+      returnConditionLogId: conditionLogId,
+      updatedAt: now,
+    };
     memoryStore.bookings.set(bookingId, booking);
 
-    // 2. Fetch or Create Escrow Payment
-    let payment = Array.from(memoryStore.payments.values()).find((p) => p.bookingId === bookingId);
-    if (!payment) {
-      payment = {
-        id: `pay_escrow_${Date.now()}`,
-        bookingId,
-        amount: booking.totalAmountInCents + (booking.depositAmountInCents || 0),
-        currency: 'ZAR',
-        status: 'HELD_IN_ESCROW',
-        paymentGatewayRef: `pstk_ret_${Date.now()}`,
-        escrowReleasedAt: null,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      };
-    }
-
-    // Release escrow: CAPTURED
-    payment.status = 'CAPTURED';
-    payment.escrowReleasedAt = now;
-    payment.updatedAt = now;
+    // 2. Release the held payment to the host (the deposit goes back to the renter).
+    const held = Array.from(memoryStore.payments.values()).find((p) => p.bookingId === bookingId);
+    if (!held) throw new Error('There is no payment on this booking to release.');
+    if (held.status !== 'HELD_IN_ESCROW') throw new Error('The payment for this booking is not being held.');
+    // Settled outside the gateway: the host's share and the renter's deposit are now owed.
+    const payment = {
+      ...held,
+      status: 'CAPTURED' as const,
+      escrowReleasedAt: now,
+      hostPayoutStatus: 'due' as const,
+      hostPayoutInCents: Math.round(stored.totalAmountInCents * 0.9),
+      depositRefundStatus: stored.depositAmountInCents > 0 ? ('due' as const) : ('none' as const),
+      updatedAt: now,
+    };
     memoryStore.payments.set(payment.id, payment);
 
     // 3. Log Condition Sign-Off
@@ -375,7 +355,7 @@ export async function initiateDispute(
   conditionStatus: 'DAMAGED' | 'MINOR_WEAR' = 'DAMAGED',
   notes: string,
   imageUrls: string[] = [],
-  reportedBy: string = 'usr_me'
+  reportedBy: string
 ): Promise<DisputeResult> {
   if (!bookingId) {
     throw new Error('Invalid parameter: bookingId is required');
@@ -390,52 +370,22 @@ export async function initiateDispute(
     const conditionLogId = `cond_dispute_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
     const systemLogId = `sys_log_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
 
-    // 1. Fetch & Update Booking
-    let booking = memoryStore.bookings.get(bookingId);
-    if (!booking) {
-      booking = {
-        id: bookingId,
-        listingId: 'list_drill_002',
-        renterId: 'usr_me',
-        pricingTierId: 'tier_drill_day',
-        status: 'ACTIVE',
-        disputeStatus: 'PENDING_REVIEW',
-        verificationCode: 'DISPUTE-88',
-        totalAmountInCents: 15000,
-        depositAmountInCents: 50000,
-        startDate: new Date(),
-        endDate: new Date(),
-        handoverCompletedAt: null,
-        handoverNotes: notes,
-        returnConditionLogId: conditionLogId,
-        createdAt: new Date(),
-        updatedAt: now,
-      };
-    } else {
-      booking.disputeStatus = 'PENDING_REVIEW';
-      booking.returnConditionLogId = conditionLogId;
-      booking.updatedAt = now;
+    // 1. Only the listing's host can report a problem, while the item is out.
+    const stored = memoryStore.bookings.get(bookingId);
+    const listing = stored ? memoryStore.listings.get(stored.listingId) : undefined;
+    if (!stored || !listing || listing.ownerId !== reportedBy) {
+      throw new Error("We couldn't find that booking for your listing.");
     }
+    if (stored.status !== 'ACTIVE') throw new Error('Only items that have been picked up can be checked back in.');
+    if (stored.disputeStatus === 'PENDING_REVIEW') throw new Error('This return is already under review.');
+
+    const booking = { ...stored, disputeStatus: 'PENDING_REVIEW' as const, returnConditionLogId: conditionLogId, updatedAt: now };
     memoryStore.bookings.set(bookingId, booking);
 
-    // 2. Fetch Escrow and Freeze
-    let payment = Array.from(memoryStore.payments.values()).find((p) => p.bookingId === bookingId);
-    if (!payment) {
-      payment = {
-        id: `pay_escrow_${Date.now()}`,
-        bookingId,
-        amount: booking.totalAmountInCents + (booking.depositAmountInCents || 0),
-        currency: 'ZAR',
-        status: 'FROZEN_ESCROW',
-        paymentGatewayRef: `pstk_freeze_${Date.now()}`,
-        escrowReleasedAt: null,
-        createdAt: new Date(),
-        updatedAt: now,
-      };
-    } else {
-      payment.status = 'FROZEN_ESCROW';
-      payment.updatedAt = now;
-    }
+    // 2. Pause the payout while the issue is reviewed.
+    const held = Array.from(memoryStore.payments.values()).find((p) => p.bookingId === bookingId);
+    if (!held) throw new Error('There is no payment on this booking to hold.');
+    const payment = { ...held, status: 'FROZEN_ESCROW' as const, updatedAt: now };
     memoryStore.payments.set(payment.id, payment);
 
     // 3. Condition / Damage Log

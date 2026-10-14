@@ -1,16 +1,30 @@
+# Local production-like stack: ShareHub + Postgres.
+#   docker compose up --build   ->  http://localhost:8787
 services:
-  web:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: sharehub-marketplace
-    ports:
-      - "8080:80"
-    restart: unless-stopped
+  db:
+    image: postgres:16-alpine
     environment:
-      - NODE_ENV=production
+      POSTGRES_USER: sharehub
+      POSTGRES_PASSWORD: sharehub
+      POSTGRES_DB: sharehub
+    volumes:
+      - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
+      test: ["CMD-SHELL", "pg_isready -U sharehub"]
+      interval: 5s
+      retries: 10
+  web:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8787:8787"
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgres://sharehub:sharehub@db:5432/sharehub
+      PUBLIC_APP_URL: http://localhost:8787
+      DEMO_MODE: "true"
+      PAYFAST_MODE: sandbox
+volumes:
+  pgdata:

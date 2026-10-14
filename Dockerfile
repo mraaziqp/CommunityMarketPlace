@@ -1,42 +1,24 @@
-# ==============================================================================
-# Multi-Stage Dockerfile for CommunityMarketPlace
-# Optimized for AWS App Runner, Amazon ECS Fargate, AWS Elastic Beanstalk & EC2
-# ==============================================================================
+# ShareHub: web app + API server in one Node container.
+# Needs DATABASE_URL and the other variables in .env.production.example.
+# For the EC2 + Caddy setup used in production, see docs/DEPLOYMENT.md.
 
-# ------------------------------------------------------------------------------
-# Stage 1: Build the Vite React Single-Page Application
-# ------------------------------------------------------------------------------
-FROM node:22-alpine AS builder
-
+FROM node:22-alpine AS build
 WORKDIR /app
-
-# Install dependencies first (layer caching)
-COPY package.json package-lock.json* ./
-RUN npm ci --prefer-offline --no-audit
-
-# Copy source files
+COPY package.json package-lock.json ./
+RUN npm ci --no-audit --no-fund
 COPY . .
+RUN npm test && npm run build
 
-# Build production assets to /app/dist
-RUN npm run build
-
-# ------------------------------------------------------------------------------
-# Stage 2: Production Nginx Server
-# ------------------------------------------------------------------------------
-FROM nginx:1.27-alpine-slim
-
-# Copy custom Nginx configuration
-COPY nginx.conf /etc/nginx/conf.d/default.conf
-
-# Copy compiled static assets from builder stage
-COPY --from=builder /app/dist /usr/share/nginx/html
-
-# Expose standard web port
-EXPOSE 80
-
-# Health check for AWS load balancers & container health monitors
-HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-  CMD wget --quiet --tries=1 --spider http://localhost/index.html || exit 1
-
-# Start Nginx in foreground
-CMD ["nginx", "-g", "daemon off;"]
+FROM node:22-alpine
+ENV NODE_ENV=production PORT=8787
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --no-audit --no-fund
+COPY --from=build /app/dist ./dist
+COPY --from=build /app/dist-server ./dist-server
+COPY --from=build /app/db/migrations ./db/migrations
+USER node
+EXPOSE 8787
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD wget -qO- http://127.0.0.1:8787/api/health || exit 1
+CMD ["node", "dist-server/index.mjs"]

@@ -9,20 +9,13 @@ import {
   AlertCircle,
   ThumbsUp,
 } from 'lucide-react';
-import { createReview } from '../../../actions/reviews';
+import { api } from '../../api/client';
 import type { BookingModel, ReviewModel } from '../../types';
 
 interface ReviewModalProps {
   isOpen: boolean;
   onClose: () => void;
   booking: BookingModel;
-  targetUser?: {
-    id: string;
-    name: string;
-    image?: string;
-    role?: string;
-    trustScore?: number;
-  };
   onReviewSubmitted?: (review: ReviewModel, newTrustScore: number) => void;
 }
 
@@ -30,12 +23,6 @@ export const ReviewModal: React.FC<ReviewModalProps> = ({
   isOpen,
   onClose,
   booking,
-  targetUser = {
-    id: 'usr_host_marcus',
-    name: 'Marcus Thorne',
-    image: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=150&auto=format&fit=crop&q=80',
-    trustScore: 99,
-  },
   onReviewSubmitted,
 }) => {
   const [rating, setRating] = useState<number>(5);
@@ -53,10 +40,13 @@ export const ReviewModal: React.FC<ReviewModalProps> = ({
 
   if (!isOpen) return null;
 
+  const hostName = booking.hostName ?? 'your host';
+  const hostFirst = hostName.split(' ')[0];
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (comment.trim().length < 5) {
-      setError('Please provide at least 5 characters of feedback for the host.');
+      setError(`Tell ${hostFirst} a little about how it went.`);
       return;
     }
 
@@ -64,10 +54,7 @@ export const ReviewModal: React.FC<ReviewModalProps> = ({
     setError(null);
 
     try {
-      const result = await createReview({
-        bookingId: booking.id,
-        targetId: targetUser.id,
-        listingId: booking.listingId,
+      const result = await api.review(booking.id, {
         rating,
         comment: comment.trim(),
         cleanlinessRating,
@@ -75,7 +62,7 @@ export const ReviewModal: React.FC<ReviewModalProps> = ({
         accuracyRating,
       });
 
-      if (result.success) {
+      {
         setSuccessResult({
           review: result.review,
           newTrustScore: result.newTrustScore,
@@ -140,8 +127,8 @@ export const ReviewModal: React.FC<ReviewModalProps> = ({
               <Award className="w-5 h-5 text-amber-700" />
             </div>
             <div>
-              <h2 className="text-lg font-bold text-stone-900">Two-Way Trust Review</h2>
-              <p className="text-xs text-stone-500">Rate your experience with {targetUser.name}</p>
+              <h2 className="text-lg font-bold text-stone-900">How was it?</h2>
+              <p className="text-xs text-stone-500">Rate your rental from {hostName}</p>
             </div>
           </div>
           <button
@@ -162,8 +149,8 @@ export const ReviewModal: React.FC<ReviewModalProps> = ({
             <div>
               <h3 className="text-lg font-bold text-stone-900">Review Submitted!</h3>
               <p className="text-sm text-stone-600 max-w-sm mx-auto mt-1">
-                Thank you for strengthening community trust. Your review and ratings have been
-                recorded to the immutable ledger.
+                Thanks for helping neighbours choose with confidence. Your review is now on
+                {' '}{hostFirst}'s profile.
               </p>
             </div>
 
@@ -177,7 +164,7 @@ export const ReviewModal: React.FC<ReviewModalProps> = ({
               </div>
               <div className="h-8 w-px bg-stone-200" />
               <div>
-                <span className="text-xs text-stone-500 font-medium">Host Trust Score</span>
+                <span className="text-xs text-stone-500 font-medium">Host trust score</span>
                 <div className="flex items-center justify-center gap-1 mt-0.5 text-emerald-700 font-bold">
                   <ShieldCheck className="w-4 h-4 text-emerald-600" />
                   <span>{successResult.newTrustScore}% Verified</span>
@@ -206,36 +193,22 @@ export const ReviewModal: React.FC<ReviewModalProps> = ({
             {/* Target Listing Context */}
             <div className="p-3 rounded-xl bg-stone-50 border border-stone-200 flex items-center justify-between">
               <div className="flex items-center gap-3">
-                {targetUser.image ? (
-                  <img
-                    src={targetUser.image}
-                    alt={targetUser.name}
-                    referrerPolicy="no-referrer"
-                    className="w-10 h-10 rounded-full object-cover border border-stone-200"
-                  />
-                ) : (
-                  <div className="w-10 h-10 rounded-full bg-emerald-100 text-emerald-800 font-bold flex items-center justify-center">
-                    {targetUser.name.charAt(0)}
-                  </div>
-                )}
+                <div className="w-10 h-10 rounded-full bg-emerald-100 text-emerald-800 font-bold flex items-center justify-center">
+                  {hostName.charAt(0)}
+                </div>
                 <div>
-                  <h4 className="text-sm font-semibold text-stone-900">{targetUser.name}</h4>
+                  <h4 className="text-sm font-semibold text-stone-900">{hostName}</h4>
                   <p className="text-xs text-stone-500 truncate max-w-[200px]">
                     Item: {booking.listingTitle}
                   </p>
                 </div>
-              </div>
-              <div className="text-right">
-                <span className="text-[11px] font-medium text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
-                  {targetUser.trustScore || 98}% Trust Score
-                </span>
               </div>
             </div>
 
             {/* Overall Star Rating */}
             <div className="text-center py-2">
               <label className="block text-xs font-bold text-stone-500 uppercase tracking-wider mb-2">
-                Overall Experience Rating
+                Overall
               </label>
               <div className="flex justify-center">
                 {renderStarSelector(rating, setRating, true)}
@@ -319,7 +292,7 @@ export const ReviewModal: React.FC<ReviewModalProps> = ({
                   htmlFor="review-comment"
                   className="text-xs font-bold text-stone-700 uppercase tracking-wider"
                 >
-                  Written Feedback
+                  Your review
                 </label>
                 <span className="text-[11px] text-stone-400">{comment.length}/500</span>
               </div>
@@ -329,7 +302,7 @@ export const ReviewModal: React.FC<ReviewModalProps> = ({
                 onChange={(e) => setComment(e.target.value)}
                 maxLength={500}
                 rows={3}
-                placeholder="Share how the equipment functioned, the handover ease, and any advice for future neighbors..."
+                placeholder="How did it work? Was pickup easy? Any tips for the next person?"
                 className="w-full rounded-xl border border-stone-300 p-3 text-sm text-stone-900 focus:border-emerald-600 focus:ring-1 focus:ring-emerald-600 outline-none transition-all placeholder:text-stone-400"
               />
             </div>
@@ -355,7 +328,7 @@ export const ReviewModal: React.FC<ReviewModalProps> = ({
                 }`}
               >
                 <Sparkles className="w-4 h-4" />
-                <span>{isSubmitting ? 'Submitting...' : 'Post Public Review'}</span>
+                <span>{isSubmitting ? 'Submitting...' : 'Post review'}</span>
               </button>
             </div>
           </form>

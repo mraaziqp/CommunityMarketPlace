@@ -1,856 +1,544 @@
-import React, { useState, useTransition } from 'react';
+import React, { useState } from 'react';
 import {
   Zap,
-  Repeat,
   CheckCircle2,
   Clock,
   AlertCircle,
-  QrCode,
-  ShieldCheck,
-  RotateCcw,
-  Sparkles,
+  KeyRound,
   History,
   X,
-  Database,
-  KeyRound,
-  FileJson,
-  Layers,
-  ArrowRight,
   Loader2,
-  Check,
   Star,
-  Lock,
-  Award,
+  CalendarDays,
+  Package,
+  Repeat,
+  CreditCard,
+  ShieldAlert,
+  Users,
+  Sparkles,
+  MessageSquare,
 } from 'lucide-react';
-import {
-  UserSubscriptionModel,
-  UsageLogModel,
-  SystemLogModel,
-  BookingModel,
-} from '../../types';
+import { ActivityHistoryItem, BookingModel, MemberActivity, UserSubscriptionModel } from '../../types';
 import { formatCurrency, cn } from '../../lib/utils';
-import { logFractionalUse } from '../../actions/usage';
-import { confirmHandover } from '../../actions/bookings';
 
 export interface FractionalUsageLoggerProps {
-  subscriptions: UserSubscriptionModel[];
-  usageLogs: UsageLogModel[];
-  systemLogs?: SystemLogModel[];
-  bookings?: BookingModel[];
-  onLogUsageSuccess?: (
-    updatedSub: { id: string; remainingUses: number },
-    newUsageLog: UsageLogModel,
-    newSystemLog: SystemLogModel
-  ) => void;
-  onConfirmHandoverSuccess?: (
-    updatedBooking: BookingModel,
-    newSystemLog: SystemLogModel
-  ) => void;
-  onResetMonth: (subscriptionId: string) => void;
+  activity: MemberActivity;
   onClose: () => void;
-  onOpenReviewModal?: (booking: BookingModel) => void;
-  onOpenEscrowModal?: (booking: BookingModel) => void;
-  onOpenReturnModal?: (booking: BookingModel) => void;
+  /** Each action rejects with a friendly message that is shown inline. */
+  onLogUsage: (subscriptionId: string, notes: string) => Promise<void>;
+  onConfirmPickup: (bookingId: string, code: string) => Promise<void>;
+  onPay: (booking: BookingModel) => void;
+  onCheckReturn: (booking: BookingModel) => void;
+  onReview: (booking: BookingModel) => void;
+  onBrowse: () => void;
 }
 
-export const FractionalUsageLogger: React.FC<FractionalUsageLoggerProps> = ({
-  subscriptions: initialSubscriptions,
-  usageLogs: initialUsageLogs,
-  systemLogs: initialSystemLogs = [],
-  bookings: initialBookings = [],
-  onLogUsageSuccess,
-  onConfirmHandoverSuccess,
-  onResetMonth,
-  onClose,
-  onOpenReviewModal,
-  onOpenEscrowModal,
-  onOpenReturnModal,
-}) => {
-  // Active state
-  const [subscriptions, setSubscriptions] = useState<UserSubscriptionModel[]>(initialSubscriptions);
-  const [usageLogs, setUsageLogs] = useState<UsageLogModel[]>(initialUsageLogs);
-  const [systemLogs, setSystemLogs] = useState<SystemLogModel[]>(initialSystemLogs);
-  const [bookings, setBookings] = useState<BookingModel[]>(
-    initialBookings.length > 0
-      ? initialBookings
-      : [
-          {
-            id: 'book_drill_001',
-            listingId: 'list_drill_002',
-            listingTitle: 'DeWalt 20V MAX Cordless Rotary Hammer Drill Kit',
-            renterId: 'usr_me',
-            renterName: 'Alex Rivera',
-            status: 'PENDING_HANDOVER',
-            disputeStatus: 'NONE',
-            verificationCode: 'HANDOVER-8842',
-            totalAmountInCents: 15000,
-            depositAmountInCents: 50000,
-            startDate: '2026-08-21 09:00',
-            endDate: '2026-08-23 18:00',
-            handoverCompletedAt: null,
-            handoverNotes: 'Includes 2x 4.0Ah batteries and bit set',
-          },
-        ]
+type Tab = 'rentals' | 'coops' | 'history';
+
+const dateFmt: Intl.DateTimeFormatOptions = { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' };
+const fmtDate = (iso: string) => new Date(iso).toLocaleString([], dateFmt);
+
+function relativeTime(iso: string) {
+  const diff = Date.now() - new Date(iso).getTime();
+  const mins = Math.round(diff / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins} min ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours} h ago`;
+  const days = Math.round(hours / 24);
+  if (days < 7) return `${days} d ago`;
+  return new Date(iso).toLocaleDateString();
+}
+
+function statusChip(b: BookingModel): { label: string; className: string } {
+  if (b.disputeStatus === 'PENDING_REVIEW') return { label: 'Under review', className: 'bg-rose-50 text-rose-800 border-rose-200' };
+  switch (b.status) {
+    case 'PENDING_PAYMENT':
+      return { label: 'Awaiting payment', className: 'bg-slate-100 text-slate-700 border-slate-200' };
+    case 'PENDING_HANDOVER':
+      return { label: 'Ready for pickup', className: 'bg-amber-50 text-amber-800 border-amber-200' };
+    case 'ACTIVE':
+      return { label: b.viewerRole === 'host' ? 'Out on loan' : 'With you', className: 'bg-indigo-50 text-indigo-800 border-indigo-200' };
+    case 'COMPLETED':
+      return { label: 'Returned', className: 'bg-emerald-50 text-emerald-800 border-emerald-200' };
+    case 'CANCELLED':
+      return { label: 'Cancelled', className: 'bg-slate-100 text-slate-500 border-slate-200' };
+    default:
+      return { label: 'Pending', className: 'bg-slate-100 text-slate-700 border-slate-200' };
+  }
+}
+
+const HISTORY_ICON: Record<ActivityHistoryItem['kind'], React.ReactNode> = {
+  booking: <CalendarDays className="w-4 h-4 text-indigo-600" />,
+  pickup: <Package className="w-4 h-4 text-amber-600" />,
+  return: <CheckCircle2 className="w-4 h-4 text-emerald-600" />,
+  usage: <Zap className="w-4 h-4 text-amber-500" />,
+  payment: <CreditCard className="w-4 h-4 text-slate-600" />,
+  review: <Star className="w-4 h-4 text-amber-500" />,
+  listing: <Sparkles className="w-4 h-4 text-indigo-600" />,
+  circle: <Users className="w-4 h-4 text-emerald-600" />,
+  account: <Sparkles className="w-4 h-4 text-indigo-600" />,
+  dispute: <ShieldAlert className="w-4 h-4 text-rose-600" />,
+};
+
+function EmptyState({ icon, title, body, onBrowse }: { icon: React.ReactNode; title: string; body: string; onBrowse: () => void }) {
+  return (
+    <div className="text-center py-12 px-4 space-y-3 bg-slate-50 rounded-2xl border border-slate-200/80">
+      <div className="w-12 h-12 mx-auto rounded-2xl bg-white border border-slate-200 flex items-center justify-center">{icon}</div>
+      <h3 className="text-base font-semibold text-slate-900">{title}</h3>
+      <p className="text-sm text-slate-500 max-w-sm mx-auto">{body}</p>
+      <button
+        type="button"
+        onClick={onBrowse}
+        className="px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold cursor-pointer"
+      >
+        Browse listings
+      </button>
+    </div>
   );
+}
 
-  const [activeTab, setActiveTab] = useState<'quotas' | 'system_logs' | 'handover'>('quotas');
-  const [selectedSubId, setSelectedSubId] = useState<string>(
-    subscriptions[0]?.id || ''
-  );
-  const [cycleNotes, setCycleNotes] = useState<string>('Daily 40°C Eco Cycle (60 min)');
-  const [handoverPin, setHandoverPin] = useState<string>('HANDOVER-8842');
-  
-  // React 19 Transition for Optimistic Server Action UI Updates
-  const [isPending, startTransition] = useTransition();
-  const [errorToast, setErrorToast] = useState<string | null>(null);
-  const [successToast, setSuccessToast] = useState<string | null>(null);
-  const [expandedJsonLogId, setExpandedJsonLogId] = useState<string | null>(null);
+function RentalCard({
+  booking,
+  onConfirmPickup,
+  onPay,
+  onCheckReturn,
+  onReview,
+}: {
+  booking: BookingModel;
+  onConfirmPickup: (bookingId: string, code: string) => Promise<void>;
+  onPay: (b: BookingModel) => void;
+  onCheckReturn: (b: BookingModel) => void;
+  onReview: (b: BookingModel) => void;
+}) {
+  const [code, setCode] = useState('');
+  const [isWorking, setIsWorking] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const chip = statusChip(booking);
+  const isHost = booking.viewerRole === 'host';
+  const hostFirst = (booking.hostName ?? 'your host').split(' ')[0];
+  const renterFirst = booking.renterName.split(' ')[0];
+  const underReview = booking.disputeStatus === 'PENDING_REVIEW';
 
-  const activeSub =
-    subscriptions.find((s) => s.id === selectedSubId) || subscriptions[0];
-
-  /**
-   * OPTIMISTIC UI: Trigger fractional usage via Next.js Server Action
-   * Drops progress meter from 10 -> 9 immediately, gracefully reverting if the action fails.
-   */
-  const handleTriggerCycle = () => {
-    if (!activeSub || isPending) return;
-
-    if (activeSub.remainingUsesThisPeriod <= 0) {
-      setErrorToast(`Quota depleted: 0 remaining uses for ${activeSub.listing.title}.`);
-      setTimeout(() => setErrorToast(null), 4000);
-      return;
+  const confirmPickup = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    setIsWorking(true);
+    try {
+      await onConfirmPickup(booking.id, code);
+      setCode('');
+    } catch (err: any) {
+      setError(err?.message || 'That did not work. Please try again.');
+    } finally {
+      setIsWorking(false);
     }
-
-    const previousSubscriptions = [...subscriptions];
-    const previousLogs = [...usageLogs];
-    const previousSystemLogs = [...systemLogs];
-
-    const currentRemaining = activeSub.remainingUsesThisPeriod;
-    const optimisticRemaining = Math.max(0, currentRemaining - 1);
-    const optimisticTotalUsed = activeSub.totalUsesUsed + 1;
-    const notesToSubmit = cycleNotes.trim() || 'Standard fractional cycle';
-
-    // 1. Instant Optimistic State Update
-    setSubscriptions((prev) =>
-      prev.map((sub) =>
-        sub.id === activeSub.id
-          ? {
-              ...sub,
-              remainingUsesThisPeriod: optimisticRemaining,
-              totalUsesUsed: optimisticTotalUsed,
-            }
-          : sub
-      )
-    );
-
-    // 2. Dispatch Server Action in a Transition
-    startTransition(async () => {
-      try {
-        const result = await logFractionalUse(
-          activeSub.id,
-          activeSub.userId,
-          notesToSubmit
-        );
-
-        if (result.success) {
-          const newUsageLogModel: UsageLogModel = {
-            id: result.usageLog.id,
-            subscriptionId: result.usageLog.subscriptionId,
-            listingId: result.usageLog.listingId,
-            listingTitle: activeSub.listing.title,
-            userId: result.usageLog.userId,
-            userName: 'Alex Rivera',
-            startedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-            unitsUsed: result.usageLog.unitsUsed,
-            status: 'completed',
-            notes: result.usageLog.notes || notesToSubmit,
-            verificationCode: result.usageLog.verificationCode || undefined,
-          };
-
-          const newSystemLogModel: SystemLogModel = {
-            id: result.systemLog.id,
-            eventType: result.systemLog.eventType as any,
-            userId: result.systemLog.userId,
-            targetId: result.systemLog.targetId,
-            metadata: result.systemLog.metadata,
-            createdAt: result.systemLog.createdAt,
-          };
-
-          setUsageLogs((prev) => [newUsageLogModel, ...prev]);
-          setSystemLogs((prev) => [newSystemLogModel, ...prev]);
-
-          if (onLogUsageSuccess) {
-            onLogUsageSuccess(
-              { id: activeSub.id, remainingUses: result.subscription.remainingUses },
-              newUsageLogModel,
-              newSystemLogModel
-            );
-          }
-
-          setSuccessToast(
-            `Transaction verified! 1 use deducted (${result.subscription.remainingUses} remaining). Logged to SystemLogs.`
-          );
-          setTimeout(() => setSuccessToast(null), 4500);
-        }
-      } catch (err: any) {
-        // Rollback Optimistic State on Error
-        setSubscriptions(previousSubscriptions);
-        setUsageLogs(previousLogs);
-        setSystemLogs(previousSystemLogs);
-
-        console.error('Fractional usage server action error:', err);
-        setErrorToast(err?.message || 'Failed to process fractional transaction. Reverting state.');
-        setTimeout(() => setErrorToast(null), 5000);
-      }
-    });
   };
 
-  /**
-   * DIGITAL HANDOVER STATE MACHINE: Confirm handover via Server Action
-   * Transitions booking status from PENDING_HANDOVER to ACTIVE
-   */
-  const handleConfirmHandover = (bookingId: string) => {
-    if (isPending) return;
+  return (
+    <article className="p-4 rounded-2xl border border-slate-200 bg-white shadow-2xs space-y-3">
+      <div className="flex items-start gap-3">
+        {booking.listingImage && (
+          <img src={booking.listingImage} alt="" referrerPolicy="no-referrer" className="w-16 h-16 rounded-xl object-cover border border-slate-200 shrink-0" />
+        )}
+        <div className="min-w-0 flex-1">
+          <div className="flex items-start justify-between gap-2">
+            <h3 className="font-bold text-sm text-slate-900 leading-snug">{booking.listingTitle}</h3>
+            <span className={cn('px-2 py-0.5 rounded-full text-[10px] font-bold border whitespace-nowrap', chip.className)}>{chip.label}</span>
+          </div>
+          <p className="text-xs text-slate-500 mt-0.5">
+            {isHost ? `Booked by ${booking.renterName}` : `Hosted by ${booking.hostName}`}
+          </p>
+          <p className="text-xs text-slate-600 mt-1 flex items-center gap-1">
+            <CalendarDays className="w-3.5 h-3.5 text-slate-400" />
+            {fmtDate(booking.startDate)} → {fmtDate(booking.endDate)}
+          </p>
+          <p className="text-xs text-slate-600 mt-0.5">
+            {formatCurrency(booking.totalAmountInCents)}
+            {booking.depositAmountInCents > 0 && (
+              <span className="text-slate-400"> + {formatCurrency(booking.depositAmountInCents)} refundable deposit</span>
+            )}
+          </p>
+        </div>
+      </div>
 
-    const previousBookings = [...bookings];
+      {error && (
+        <div role="alert" className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-start gap-2">
+          <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+          <span>{error}</span>
+        </div>
+      )}
 
-    // Optimistic Update
-    setBookings((prev) =>
-      prev.map((b) =>
-        b.id === bookingId
-          ? {
-              ...b,
-              status: 'ACTIVE',
-              handoverCompletedAt: new Date().toISOString(),
-            }
-          : b
-      )
-    );
-
-    startTransition(async () => {
-      try {
-        const result = await confirmHandover(bookingId, handoverPin, 'usr_me');
-
-        if (result.success) {
-          const newSystemLogModel: SystemLogModel = {
-            id: result.systemLog.id,
-            eventType: result.systemLog.eventType as any,
-            userId: result.systemLog.userId,
-            targetId: result.systemLog.targetId,
-            metadata: result.systemLog.metadata,
-            createdAt: result.systemLog.createdAt,
-          };
-
-          setSystemLogs((prev) => [newSystemLogModel, ...prev]);
-
-          const updatedBooking: BookingModel = {
-            id: result.booking.id,
-            listingId: result.booking.listingId,
-            listingTitle:
-              bookings.find((b) => b.id === bookingId)?.listingTitle ||
-              'DeWalt Cordless Rotary Hammer Drill',
-            renterId: result.booking.renterId,
-            renterName: 'Alex Rivera',
-            status: 'ACTIVE',
-            disputeStatus: 'NONE',
-            verificationCode: result.booking.verificationCode,
-            totalAmountInCents: result.booking.totalAmountInCents,
-            depositAmountInCents: result.booking.depositAmountInCents,
-            startDate: result.booking.startDate,
-            endDate: result.booking.endDate,
-            handoverCompletedAt: result.booking.handoverCompletedAt,
-          };
-
-          if (onConfirmHandoverSuccess) {
-            onConfirmHandoverSuccess(updatedBooking, newSystemLogModel);
-          }
-
-          setSuccessToast(
-            'Handover confirmed! Status changed to ACTIVE. Liability transfer logged in SystemLogs.'
-          );
-          setTimeout(() => setSuccessToast(null), 5000);
-        }
-      } catch (err: any) {
-        setBookings(previousBookings);
-        setErrorToast(err?.message || 'Handover confirmation failed.');
-        setTimeout(() => setErrorToast(null), 5000);
-      }
-    });
-  };
-
-  const handleMonthlyCycleReset = () => {
-    if (!activeSub) return;
-    onResetMonth(activeSub.id);
-    const limit = activeSub.pricingTier.usageLimitPerPeriod || 10;
-    setSubscriptions((prev) =>
-      prev.map((s) =>
-        s.id === activeSub.id ? { ...s, remainingUsesThisPeriod: limit } : s
-      )
-    );
-    setSuccessToast(`Monthly cycle reset! Quota replenished to ${limit} uses.`);
-    setTimeout(() => setSuccessToast(null), 4000);
-  };
-
-  const filteredLogs = usageLogs.filter(
-    (l) => !selectedSubId || l.subscriptionId === selectedSubId
+      {underReview ? (
+        <div className="p-3 rounded-xl bg-rose-50/70 border border-rose-200 text-xs text-rose-900">
+          {isHost
+            ? "You reported a problem with this return. We're looking into it and the payout is paused until it's sorted."
+            : `${hostFirst} reported a problem with the return. We're looking into it and will be in touch.`}
+        </div>
+      ) : booking.status === 'PENDING_PAYMENT' ? (
+        isHost ? (
+          <p className="p-3 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-700">
+            Waiting for {renterFirst} to pay. We'll show you the pickup code once they do.
+          </p>
+        ) : (
+          <div className="flex items-center justify-between gap-3 p-3 rounded-xl bg-slate-50 border border-slate-200">
+            <p className="text-xs text-slate-700">Your dates are held for 30 minutes. Pay to lock them in.</p>
+            <button
+              type="button"
+              onClick={() => onPay(booking)}
+              className="px-3.5 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs flex items-center gap-1.5 cursor-pointer"
+            >
+              <CreditCard className="w-3.5 h-3.5" /> Pay now
+            </button>
+          </div>
+        )
+      ) : booking.status === 'CANCELLED' ? (
+        <p className="p-3 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-600">
+          {isHost ? 'This booking was not paid for, so the dates were released.' : 'This booking was not paid in time, so the dates were released. You can book again any time.'}
+        </p>
+      ) : booking.status === 'PENDING_HANDOVER' ? (
+        isHost ? (
+          <div className="p-3 rounded-xl bg-amber-50/70 border border-amber-200 text-xs text-amber-950 space-y-1.5">
+            <p>
+              {renterFirst} is collecting on {fmtDate(booking.startDate)}. Give them this code when you hand it over:
+            </p>
+            <p className="font-mono text-lg font-bold tracking-wider text-amber-900">{booking.verificationCode}</p>
+          </div>
+        ) : (
+          <form onSubmit={confirmPickup} className="p-3 rounded-xl bg-amber-50/70 border border-amber-200 space-y-2">
+            <p className="text-xs text-amber-950">
+              <KeyRound className="w-3.5 h-3.5 inline mr-1 -mt-0.5" />
+              When you collect it, {hostFirst} will give you a pickup code. Enter it here to confirm you have the item.
+            </p>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={code}
+                onChange={(e) => setCode(e.target.value)}
+                placeholder="PICKUP-1234"
+                aria-label="Pickup code"
+                autoCapitalize="characters"
+                className="flex-1 min-w-0 px-3 py-2 text-sm bg-white rounded-xl border border-slate-200 focus:border-slate-400 outline-none font-mono uppercase"
+              />
+              <button
+                type="submit"
+                disabled={isWorking || code.trim().length < 3}
+                className="py-2 px-4 rounded-xl font-bold text-xs text-white bg-slate-900 hover:bg-slate-800 disabled:opacity-50 transition-all flex items-center gap-1.5 shrink-0 cursor-pointer"
+              >
+                {isWorking ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />}
+                Confirm pickup
+              </button>
+            </div>
+          </form>
+        )
+      ) : booking.status === 'ACTIVE' ? (
+        isHost ? (
+          <div className="flex flex-wrap items-center justify-between gap-3 p-3 rounded-xl bg-indigo-50/70 border border-indigo-200">
+            <p className="text-xs text-indigo-950">Due back {fmtDate(booking.endDate)}. Check it over when {renterFirst} returns it.</p>
+            <button
+              type="button"
+              onClick={() => onCheckReturn(booking)}
+              className="px-3.5 py-2 rounded-xl bg-indigo-700 hover:bg-indigo-800 text-white font-bold text-xs flex items-center gap-1.5 cursor-pointer"
+            >
+              <CheckCircle2 className="w-3.5 h-3.5" /> Check it back in
+            </button>
+          </div>
+        ) : (
+          <p className="p-3 rounded-xl bg-indigo-50/70 border border-indigo-200 text-xs text-indigo-950">
+            Enjoy! Please return it to {hostFirst} by {fmtDate(booking.endDate)}. Your deposit comes back once it's checked in.
+          </p>
+        )
+      ) : booking.status === 'COMPLETED' ? (
+        isHost ? (
+          <p className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-900">
+            Returned and checked in. Your payment has been released.
+          </p>
+        ) : booking.hasReview ? (
+          <p className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-900 flex items-center gap-1.5">
+            <CheckCircle2 className="w-4 h-4" /> Returned. Thanks for leaving a review!
+          </p>
+        ) : (
+          <div className="flex flex-wrap items-center justify-between gap-3 p-3 rounded-xl bg-amber-50/60 border border-amber-200">
+            <p className="text-xs text-amber-950">All done, and your deposit is on its way back. How was it?</p>
+            <button
+              type="button"
+              onClick={() => onReview(booking)}
+              className="px-3.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-600 text-stone-950 font-bold text-xs flex items-center gap-1.5 cursor-pointer"
+            >
+              <Star className="w-3.5 h-3.5 fill-stone-950" /> Review {hostFirst}
+            </button>
+          </div>
+        )
+      ) : null}
+    </article>
   );
+}
+
+function CoopPanel({
+  subscriptions,
+  usageLogs,
+  onLogUsage,
+}: {
+  subscriptions: UserSubscriptionModel[];
+  usageLogs: MemberActivity['usageLogs'];
+  onLogUsage: (subscriptionId: string, notes: string) => Promise<void>;
+}) {
+  const [selectedId, setSelectedId] = useState(subscriptions[0]?.id ?? '');
+  const [notes, setNotes] = useState('');
+  const [isWorking, setIsWorking] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const active = subscriptions.find((s) => s.id === selectedId) ?? subscriptions[0];
+  const logs = usageLogs.filter((l) => l.subscriptionId === active?.id);
+
+  const startTurn = async () => {
+    if (!active) return;
+    setError(null);
+    setIsWorking(true);
+    try {
+      await onLogUsage(active.id, notes.trim());
+      setNotes('');
+    } catch (err: any) {
+      setError(err?.message || 'That did not work. Please try again.');
+    } finally {
+      setIsWorking(false);
+    }
+  };
+
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-12 gap-6">
+      <div className="md:col-span-6 space-y-3">
+        {subscriptions.map((sub) => {
+          const limit = sub.pricingTier.usageLimitPerPeriod || 10;
+          const pct = (sub.remainingUsesThisPeriod / limit) * 100;
+          const isSelected = sub.id === active?.id;
+          return (
+            <button
+              key={sub.id}
+              type="button"
+              onClick={() => setSelectedId(sub.id)}
+              aria-pressed={isSelected}
+              className={cn(
+                'w-full p-3.5 rounded-2xl border text-left cursor-pointer transition-all',
+                isSelected ? 'bg-slate-50 border-slate-900 ring-2 ring-slate-200' : 'bg-white border-slate-200 hover:border-slate-300'
+              )}
+            >
+              <div className="flex items-start justify-between gap-2 mb-1.5">
+                <h4 className="font-bold text-xs text-slate-900 line-clamp-1">{sub.listing.title}</h4>
+                <span className="text-[11px] font-semibold text-slate-600 whitespace-nowrap">{sub.pricingTier.name}</span>
+              </div>
+              <div className="flex items-center justify-between text-[11px] mb-1">
+                <span className="text-slate-500">Turns left</span>
+                <span className="font-bold text-slate-800">
+                  {sub.remainingUsesThisPeriod} of {limit}
+                </span>
+              </div>
+              <div className="w-full h-2.5 rounded-full bg-slate-100 overflow-hidden">
+                <div
+                  className={cn(
+                    'h-full transition-all duration-300',
+                    sub.remainingUsesThisPeriod > 3 ? 'bg-slate-900' : sub.remainingUsesThisPeriod > 0 ? 'bg-amber-500' : 'bg-rose-500'
+                  )}
+                  style={{ width: `${Math.max(4, pct)}%` }}
+                />
+              </div>
+              <p className="text-[10px] text-slate-400 mt-1.5">Refreshes {new Date(sub.currentPeriodEnd).toLocaleDateString()}</p>
+            </button>
+          );
+        })}
+
+        {active && (
+          <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-3">
+            {error && (
+              <div role="alert" className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                <span>{error}</span>
+              </div>
+            )}
+            <div className="p-3 rounded-xl bg-white border border-slate-200 flex items-center gap-2.5 text-xs text-slate-800">
+              <KeyRound className="w-4 h-4 text-indigo-600 shrink-0" />
+              <span>
+                Your access code: <strong className="font-mono text-sm">{active.accessKeyOrCode}</strong>
+              </span>
+            </div>
+            <label className="block">
+              <span className="text-xs font-semibold text-slate-700 block mb-1">
+                Note <span className="font-normal text-slate-400">(optional)</span>
+              </span>
+              <input
+                type="text"
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                placeholder="e.g. 40° cotton wash"
+                className="w-full px-3 py-2 text-sm bg-white rounded-xl border border-slate-200 focus:border-slate-400 outline-none"
+              />
+            </label>
+            <button
+              type="button"
+              onClick={startTurn}
+              disabled={isWorking || active.remainingUsesThisPeriod <= 0}
+              className="w-full py-2.5 px-4 rounded-xl font-bold text-sm text-white flex items-center justify-center gap-2 transition-all shadow-xs cursor-pointer bg-slate-900 hover:bg-slate-800 disabled:bg-slate-400 disabled:cursor-not-allowed"
+            >
+              {isWorking ? <Loader2 className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4 text-amber-400" />}
+              {active.remainingUsesThisPeriod > 0 ? 'Start my turn' : 'No turns left this period'}
+            </button>
+          </div>
+        )}
+      </div>
+
+      <div className="md:col-span-6 flex flex-col space-y-3">
+        <span className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
+          <History className="w-3.5 h-3.5 text-indigo-600" />
+          Usage log
+        </span>
+        <div className="flex-1 bg-slate-50 rounded-2xl border border-slate-200 p-3 overflow-y-auto max-h-[380px] space-y-2">
+          {logs.length === 0 ? (
+            <p className="text-center py-10 text-xs text-slate-500">No turns yet this period. Start one when you're ready.</p>
+          ) : (
+            logs.map((log) => (
+              <div key={log.id} className="p-3 rounded-xl bg-white border border-slate-200/80 flex items-start justify-between gap-3 text-xs">
+                <div className="min-w-0">
+                  <p className="font-semibold text-slate-900">{log.notes || 'Turn used'}</p>
+                  <p className="text-[11px] text-slate-500 truncate">{log.listingTitle}</p>
+                </div>
+                <span className="text-[10px] text-slate-400 whitespace-nowrap">{relativeTime(log.startedAt)}</span>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** "My activity": rentals, shared appliances and a readable history for the signed-in member. */
+export const FractionalUsageLogger: React.FC<FractionalUsageLoggerProps> = ({
+  activity,
+  onClose,
+  onLogUsage,
+  onConfirmPickup,
+  onPay,
+  onCheckReturn,
+  onReview,
+  onBrowse,
+}) => {
+  const [tab, setTab] = useState<Tab>(activity.bookings.length > 0 || activity.subscriptions.length === 0 ? 'rentals' : 'coops');
+  const needsAttention = activity.bookings.some(
+    (b) =>
+      (b.status === 'PENDING_PAYMENT' && b.viewerRole === 'renter') ||
+      b.status === 'PENDING_HANDOVER' ||
+      (b.status === 'ACTIVE' && b.viewerRole === 'host') ||
+      (b.status === 'COMPLETED' && b.viewerRole === 'renter' && !b.hasReview)
+  );
+
+  const tabs: { id: Tab; label: string; icon: React.ReactNode; count?: number; dot?: boolean }[] = [
+    { id: 'rentals', label: 'Rentals', icon: <CalendarDays className="w-3.5 h-3.5" />, count: activity.bookings.length, dot: needsAttention },
+    { id: 'coops', label: 'Shared appliances', icon: <Repeat className="w-3.5 h-3.5" />, count: activity.subscriptions.length },
+    { id: 'history', label: 'Activity history', icon: <History className="w-3.5 h-3.5" /> },
+  ];
 
   return (
     <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-3 sm:p-6 animate-in fade-in duration-200">
-      <div className="relative w-full max-w-4xl bg-white rounded-2xl shadow-2xl border border-slate-200/90 overflow-hidden flex flex-col max-h-[calc(100dvh-2rem)]">
-        {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 bg-slate-900 text-white">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="activity-title"
+        className="relative w-full max-w-4xl bg-white rounded-2xl shadow-2xl border border-slate-200/90 overflow-hidden flex flex-col max-h-[calc(100dvh-2rem)]"
+      >
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-slate-800 text-white flex items-center justify-center border border-slate-700">
+            <div className="w-9 h-9 rounded-xl bg-slate-900 text-white flex items-center justify-center">
               <Clock className="w-4.5 h-4.5 text-amber-400" />
             </div>
             <div>
-              <h2 className="text-base font-bold text-white tracking-tight">
-                My Active Quotas & Fractional Usage Engine
+              <h2 id="activity-title" className="text-base font-bold text-slate-900 tracking-tight">
+                My activity
               </h2>
-              <p className="text-xs text-slate-400">
-                Optimistic UI, atomic Drizzle transactions (`db.transaction`), & immutable SystemLogs
-              </p>
+              <p className="text-xs text-slate-500">Manage your shared access and usage history.</p>
             </div>
           </div>
-
           <button
             type="button"
+            aria-label="Close"
             onClick={onClose}
-            className="p-1.5 rounded-full text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+            className="p-1.5 rounded-full text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        {/* Sub-Header Tab Bar */}
-        <div className="flex items-center justify-between px-6 py-2.5 bg-slate-50 border-b border-slate-200">
-          <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 px-6 py-2.5 bg-slate-50 border-b border-slate-200 overflow-x-auto" role="tablist">
+          {tabs.map((t) => (
             <button
+              key={t.id}
               type="button"
-              onClick={() => setActiveTab('quotas')}
+              role="tab"
+              aria-selected={tab === t.id}
+              onClick={() => setTab(t.id)}
               className={cn(
-                'px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer',
-                activeTab === 'quotas'
-                  ? 'bg-slate-900 text-white shadow-xs'
-                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
+                'px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer whitespace-nowrap',
+                tab === t.id ? 'bg-slate-900 text-white shadow-xs' : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
               )}
             >
-              <Zap className="w-3.5 h-3.5" />
-              <span>Fractional Quota Meter</span>
+              {t.icon}
+              <span>{t.label}</span>
+              {t.count ? <span className="opacity-70">({t.count})</span> : null}
+              {t.dot && <span className="w-2 h-2 rounded-full bg-amber-400" aria-label="Needs your attention" />}
             </button>
-
-            <button
-              type="button"
-              onClick={() => setActiveTab('handover')}
-              className={cn(
-                'px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer',
-                activeTab === 'handover'
-                  ? 'bg-slate-900 text-white shadow-xs'
-                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
-              )}
-            >
-              <KeyRound className="w-3.5 h-3.5" />
-              <span>Digital Handover</span>
-              {bookings.some((b) => b.status === 'PENDING_HANDOVER') && (
-                <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
-              )}
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setActiveTab('system_logs')}
-              className={cn(
-                'px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer',
-                activeTab === 'system_logs'
-                  ? 'bg-slate-900 text-white shadow-xs'
-                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
-              )}
-            >
-              <Database className="w-3.5 h-3.5" />
-              <span>Immutable SystemLogs ({systemLogs.length})</span>
-            </button>
-          </div>
-
-          <div className="flex items-center gap-2 text-[11px] text-slate-500 font-medium">
-            <span className="inline-block w-2 h-2 rounded-full bg-emerald-500" />
-            <span>Neon Serverless Ready</span>
-          </div>
+          ))}
         </div>
 
-        {/* Global Toast Banners */}
-        {successToast && (
-          <div className="mx-6 mt-4 p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-900 text-xs font-medium flex items-center gap-2 animate-in fade-in">
-            <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-            <span>{successToast}</span>
-          </div>
-        )}
+        <div className="overflow-y-auto p-6 space-y-4">
+          {tab === 'rentals' &&
+            (activity.bookings.length === 0 ? (
+              <EmptyState
+                icon={<CalendarDays className="w-6 h-6 text-slate-400" />}
+                title="No rentals yet"
+                body="Borrow a drill for the weekend, a roof box for a road trip, or a studio for an afternoon."
+                onBrowse={onBrowse}
+              />
+            ) : (
+              activity.bookings.map((b) => (
+                <RentalCard key={b.id} booking={b} onConfirmPickup={onConfirmPickup} onPay={onPay} onCheckReturn={onCheckReturn} onReview={onReview} />
+              ))
+            ))}
 
-        {errorToast && (
-          <div className="mx-6 mt-4 p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-900 text-xs font-medium flex items-center gap-2 animate-in fade-in">
-            <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
-            <span>{errorToast}</span>
-          </div>
-        )}
+          {tab === 'coops' &&
+            (activity.subscriptions.length === 0 ? (
+              <EmptyState
+                icon={<Repeat className="w-6 h-6 text-slate-400" />}
+                title="You're not sharing any appliances yet"
+                body="Join a small group sharing a washing machine, 3D printer or solar battery nearby, and use it whenever you need."
+                onBrowse={onBrowse}
+              />
+            ) : (
+              <CoopPanel subscriptions={activity.subscriptions} usageLogs={activity.usageLogs} onLogUsage={onLogUsage} />
+            ))}
 
-        {/* Content Body */}
-        <div className="overflow-y-auto p-6 space-y-6">
-          {activeTab === 'quotas' && (
-            <>
-              {subscriptions.length === 0 ? (
-                <div className="text-center py-12 px-4 space-y-3 bg-slate-50 rounded-2xl border border-slate-200/80">
-                  <Zap className="w-12 h-12 text-slate-300 mx-auto" />
-                  <h3 className="text-base font-semibold text-slate-900">
-                    No active subscriptions yet
-                  </h3>
-                  <p className="text-xs text-slate-500 max-w-md mx-auto">
-                    Browse our community listings to join a fractional washing machine co-op, 3D printer hub, or clean energy station.
-                  </p>
-                </div>
-              ) : (
-                <div className="grid grid-cols-1 md:grid-cols-12 gap-6">
-                  {/* Left Column: Subscription Selector & Active Meter */}
-                  <div className="md:col-span-6 space-y-4">
-                    <label className="text-xs font-bold text-slate-900 uppercase tracking-wider block">
-                      Select Active Subscription
-                    </label>
-
-                    <div className="space-y-2">
-                      {subscriptions.map((sub) => {
-                        const isSelected = sub.id === selectedSubId;
-                        const maxQuota = sub.pricingTier.usageLimitPerPeriod || 10;
-                        const percentage = (sub.remainingUsesThisPeriod / maxQuota) * 100;
-
-                        return (
-                          <div
-                            key={sub.id}
-                            onClick={() => setSelectedSubId(sub.id)}
-                            className={cn(
-                              'p-3.5 rounded-2xl border text-left cursor-pointer transition-all',
-                              isSelected
-                                ? 'bg-slate-50 border-slate-900 ring-2 ring-slate-200 shadow-xs'
-                                : 'bg-white border-slate-200 hover:border-slate-300'
-                            )}
-                          >
-                            <div className="flex items-start justify-between gap-2 mb-1.5">
-                              <h4 className="font-bold text-xs text-slate-900 line-clamp-1">
-                                {sub.listing.title}
-                              </h4>
-                              <span className="text-[11px] font-bold text-slate-900 whitespace-nowrap bg-slate-100 px-2 py-0.5 rounded-md border border-slate-200/70">
-                                {formatCurrency(sub.pricingTier.priceInCents, sub.pricingTier.currency)}/mo
-                              </span>
-                            </div>
-
-                            {/* Progress Bar with Instant Optimistic Visual Feedback */}
-                            <div className="space-y-1">
-                              <div className="flex items-center justify-between text-[11px]">
-                                <span className="text-slate-500 font-medium">Monthly Allocation</span>
-                                <span className="font-bold text-slate-800">
-                                  {sub.remainingUsesThisPeriod} / {maxQuota} uses remaining
-                                </span>
-                              </div>
-                              <div className="w-full h-2.5 rounded-full bg-slate-100 overflow-hidden flex">
-                                <div
-                                  className={cn(
-                                    'h-full transition-all duration-300 ease-out',
-                                    sub.remainingUsesThisPeriod > 3
-                                      ? 'bg-slate-900'
-                                      : sub.remainingUsesThisPeriod > 0
-                                      ? 'bg-amber-500'
-                                      : 'bg-rose-500'
-                                  )}
-                                  style={{ width: `${Math.max(4, percentage)}%` }}
-                                />
-                              </div>
-                            </div>
-                          </div>
-                        );
-                      })}
+          {tab === 'history' &&
+            (activity.history.length === 0 ? (
+              <EmptyState
+                icon={<MessageSquare className="w-6 h-6 text-slate-400" />}
+                title="Nothing here yet"
+                body="Your bookings, turns and reviews will appear here as you use ShareHub."
+                onBrowse={onBrowse}
+              />
+            ) : (
+              <ol className="space-y-2">
+                {activity.history.map((item) => (
+                  <li key={item.id} className="p-3.5 rounded-2xl bg-white border border-slate-200 flex items-start gap-3">
+                    <span className="w-8 h-8 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-center shrink-0">
+                      {HISTORY_ICON[item.kind]}
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-semibold text-slate-900">{item.title}</p>
+                      {item.detail && <p className="text-xs text-slate-500">{item.detail}</p>}
                     </div>
-
-                    {/* Quota Action Simulator */}
-                    {activeSub && (
-                      <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-3">
-                        <div className="flex items-center justify-between">
-                          <span className="text-xs font-bold text-slate-900 uppercase tracking-wider flex items-center gap-1.5">
-                            <Zap className="w-3.5 h-3.5 text-amber-500" />
-                            Trigger Fractional Use (Server Action)
-                          </span>
-                          <button
-                            type="button"
-                            onClick={handleMonthlyCycleReset}
-                            className="text-[11px] font-semibold text-indigo-600 hover:text-indigo-800 inline-flex items-center gap-1 cursor-pointer"
-                          >
-                            <RotateCcw className="w-3 h-3" />
-                            Simulate Month Reset
-                          </button>
-                        </div>
-
-                        <div>
-                          <label className="text-[11px] font-medium text-slate-600 block mb-1">
-                            Cycle / Workload Description:
-                          </label>
-                          <input
-                            type="text"
-                            value={cycleNotes}
-                            onChange={(e) => setCycleNotes(e.target.value)}
-                            placeholder="e.g. 60 min Cotton Eco Wash"
-                            className="w-full px-3 py-2 text-xs bg-white rounded-xl border border-slate-200 focus:border-slate-400 outline-none"
-                          />
-                        </div>
-
-                        <button
-                          type="button"
-                          onClick={handleTriggerCycle}
-                          disabled={isPending || activeSub.remainingUsesThisPeriod <= 0}
-                          className={cn(
-                            'w-full py-2.5 px-4 rounded-xl font-bold text-xs text-white flex items-center justify-center gap-2 transition-all shadow-xs cursor-pointer',
-                            isPending
-                              ? 'bg-slate-700 cursor-wait'
-                              : activeSub.remainingUsesThisPeriod > 0
-                              ? 'bg-slate-900 hover:bg-slate-800'
-                              : 'bg-slate-400 cursor-not-allowed'
-                          )}
-                        >
-                          {isPending ? (
-                            <>
-                              <Loader2 className="w-4 h-4 text-amber-400 animate-spin" />
-                              <span>Executing Drizzle Transaction (`db.transaction`)...</span>
-                            </>
-                          ) : (
-                            <>
-                              <Zap className="w-4 h-4 text-amber-400" />
-                              <span>
-                                {activeSub.remainingUsesThisPeriod > 0
-                                  ? `Log 1 Usage (${activeSub.remainingUsesThisPeriod} Remaining)`
-                                  : 'Quota Depleted'}
-                              </span>
-                            </>
-                          )}
-                        </button>
-
-                        <div className="p-3 rounded-xl bg-slate-100 border border-slate-200/80 flex items-center gap-2.5 text-[11px] text-slate-800">
-                          <QrCode className="w-4 h-4 text-indigo-600 shrink-0" />
-                          <span>
-                            Access Key / Smart Plug Passcode: <strong className="font-mono">{activeSub.accessKeyOrCode}</strong>
-                          </span>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Right Column: Immutable Audit Ledger (`UsageLogs`) */}
-                  <div className="md:col-span-6 flex flex-col space-y-3">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold text-slate-900 uppercase tracking-wider flex items-center gap-1.5">
-                        <History className="w-3.5 h-3.5 text-indigo-600" />
-                        Timestamped Usage Ledger (`UsageLogs`)
-                      </span>
-                      <span className="text-[11px] text-slate-500 font-medium">
-                        {filteredLogs.length} logged events
-                      </span>
-                    </div>
-
-                    <div className="flex-1 bg-slate-50 rounded-2xl border border-slate-200 p-3 overflow-y-auto max-h-[380px] space-y-2">
-                      {filteredLogs.length === 0 ? (
-                        <div className="text-center py-10 text-xs text-slate-400">
-                          No usage records yet for this listing. Trigger a cycle to see live audit logs.
-                        </div>
-                      ) : (
-                        filteredLogs.map((log) => (
-                          <div
-                            key={log.id}
-                            className="p-3 rounded-xl bg-white border border-slate-200/80 shadow-2xs flex items-start justify-between gap-3 text-xs"
-                          >
-                            <div className="space-y-0.5 min-w-0">
-                              <div className="flex items-center gap-1.5">
-                                <span className="font-bold text-slate-900 truncate">
-                                  {log.listingTitle}
-                                </span>
-                                <span className="px-1.5 py-0.5 rounded-md text-[9px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-200/70">
-                                  -1 Quota
-                                </span>
-                              </div>
-                              <p className="text-[11px] text-slate-600">{log.notes || 'Standard Usage Run'}</p>
-                              <p className="text-[10px] text-slate-400 font-mono">
-                                Log ID: {log.id} · Verified Code: {log.verificationCode || 'IOT_VERIFIED'}
-                              </p>
-                            </div>
-
-                            <div className="text-right shrink-0">
-                              <span className="text-[10px] text-slate-400 block font-medium">{log.startedAt}</span>
-                              <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-700">
-                                <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-                                Completed
-                              </span>
-                            </div>
-                          </div>
-                        ))
-                      )}
-                    </div>
-                  </div>
-                </div>
-              )}
-            </>
-          )}
-
-          {/* Tab 2: Digital Handover State Machine */}
-          {activeTab === 'handover' && (
-            <div className="space-y-6">
-              <div className="p-4 rounded-2xl bg-slate-900 text-white space-y-2">
-                <div className="flex items-center gap-2 text-xs font-bold text-amber-400 uppercase tracking-wider">
-                  <KeyRound className="w-4 h-4" />
-                  <span>Digital Handover State Machine (`actions/bookings.ts`)</span>
-                </div>
-                <p className="text-xs text-slate-300 leading-relaxed">
-                  Time-based physical item rentals transition from <code>PENDING_HANDOVER</code> to <code>ACTIVE</code> upon physical or QR token verification. This records the legal liability transfer timestamp directly into <code>SystemLogs</code>.
-                </p>
-              </div>
-
-              <div className="space-y-4">
-                {bookings.map((booking) => {
-                  const isPendingHandover = booking.status === 'PENDING_HANDOVER';
-
-                  return (
-                    <div
-                      key={booking.id}
-                      className="p-5 rounded-2xl border border-slate-200 bg-white shadow-2xs space-y-4"
-                    >
-                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
-                        <div>
-                          <div className="flex items-center gap-2">
-                            <h3 className="font-bold text-sm text-slate-900">
-                              {booking.listingTitle}
-                            </h3>
-                            <span
-                              className={cn(
-                                'px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider',
-                                isPendingHandover
-                                  ? 'bg-amber-50 text-amber-800 border border-amber-200'
-                                  : 'bg-emerald-50 text-emerald-800 border border-emerald-200'
-                              )}
-                            >
-                              {booking.status}
-                            </span>
-                          </div>
-                          <p className="text-xs text-slate-500 mt-0.5">
-                            Renter: <strong>{booking.renterName}</strong> · Rental Window: {booking.startDate} to {booking.endDate}
-                          </p>
-                        </div>
-
-                        <div className="text-right">
-                          <span className="text-xs font-bold text-slate-900 block">
-                            {formatCurrency(booking.totalAmountInCents, 'ZAR')}
-                          </span>
-                          <span className="text-[10px] text-slate-500">
-                            Deposit: {formatCurrency(booking.depositAmountInCents, 'ZAR')} held
-                          </span>
-                        </div>
-                      </div>
-
-                      {/* State transition triggers & actions */}
-                      {isPendingHandover ? (
-                        <div className="p-4 rounded-xl bg-amber-50/70 border border-amber-200/80 space-y-3">
-                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                            <span className="text-xs font-bold text-amber-900">
-                              Step 1: Escrow & Handover Verification
-                            </span>
-                            <div className="flex items-center gap-2">
-                              {onOpenEscrowModal && (
-                                <button
-                                  type="button"
-                                  onClick={() => onOpenEscrowModal(booking)}
-                                  className="px-2.5 py-1 rounded-lg bg-amber-200/80 hover:bg-amber-300 text-amber-900 text-[11px] font-semibold flex items-center gap-1 transition-colors"
-                                >
-                                  <Lock className="w-3 h-3 text-amber-800" />
-                                  <span>Manage Escrow Hold</span>
-                                </button>
-                              )}
-                              <span className="text-[11px] font-mono text-amber-800 bg-amber-100/80 px-2 py-0.5 rounded-md border border-amber-300/50">
-                                PIN: {booking.verificationCode}
-                              </span>
-                            </div>
-                          </div>
-
-                          <div className="flex items-center gap-2">
-                            <input
-                              type="text"
-                              value={handoverPin}
-                              onChange={(e) => setHandoverPin(e.target.value)}
-                              placeholder="Enter scanned PIN / token"
-                              className="flex-1 px-3 py-2 text-xs bg-white rounded-xl border border-slate-200 focus:border-slate-400 outline-none font-mono"
-                            />
-                            <button
-                              type="button"
-                              onClick={() => handleConfirmHandover(booking.id)}
-                              disabled={isPending}
-                              className="py-2 px-4 rounded-xl font-bold text-xs text-white bg-slate-900 hover:bg-slate-800 transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
-                            >
-                              {isPending ? (
-                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                              ) : (
-                                <Check className="w-3.5 h-3.5 text-emerald-400" />
-                              )}
-                              Confirm & Capture Escrow
-                            </button>
-                          </div>
-                        </div>
-                      ) : booking.status === 'ACTIVE' ? (
-                        <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-900 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                          <div className="flex items-center gap-2">
-                            <ShieldCheck className="w-4 h-4 text-emerald-600" />
-                            <div>
-                              <span>
-                                <strong>Active Rental</strong> · Escrow Captured & Handover Verified at{' '}
-                                {booking.handoverCompletedAt
-                                  ? new Date(booking.handoverCompletedAt).toLocaleTimeString()
-                                  : 'Verified'}
-                              </span>
-                              <div className="text-[10px] text-emerald-700 font-mono mt-0.5">
-                                Funds secured · Deposit held safely in escrow until return
-                              </div>
-                            </div>
-                          </div>
-                          <div className="flex items-center gap-2">
-                            <button
-                              type="button"
-                              onClick={() => {
-                                if (onOpenReturnModal) {
-                                  onOpenReturnModal(booking);
-                                } else {
-                                  setBookings((prev) =>
-                                    prev.map((b) =>
-                                      b.id === booking.id
-                                        ? { ...b, status: 'COMPLETED' }
-                                        : b
-                                    )
-                                  );
-                                  setSuccessToast('Return completed! Security deposit released.');
-                                }
-                              }}
-                              className="px-3 py-1.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs flex items-center gap-1.5 shadow-2xs transition-colors cursor-pointer"
-                            >
-                              <CheckCircle2 className="w-3.5 h-3.5 text-white" />
-                              <span>Inspect & Return Handover</span>
-                            </button>
-                          </div>
-                        </div>
-                      ) : (
-                        /* Completed status with Review trigger */
-                        <div className="p-3.5 rounded-xl bg-stone-50 border border-stone-200 text-stone-900 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                          <div className="flex items-center gap-2">
-                            <Award className="w-4 h-4 text-amber-600" />
-                            <div>
-                              <span className="font-semibold text-stone-800">
-                                Rental Completed & Escrow Reconciled
-                              </span>
-                              <p className="text-[11px] text-stone-500">
-                                Deposit released. Leave a review to elevate community trust score.
-                              </p>
-                            </div>
-                          </div>
-
-                          {onOpenReviewModal && (
-                            <button
-                              type="button"
-                              onClick={() => onOpenReviewModal(booking)}
-                              className="px-3 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-600 text-stone-950 font-bold text-xs flex items-center gap-1.5 shadow-2xs transition-colors"
-                            >
-                              <Star className="w-3.5 h-3.5 fill-stone-950 text-stone-950" />
-                              <span>Review Host</span>
-                            </button>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-
-          {/* Tab 3: Immutable System Logs (JSONB Metadata Viewer) */}
-          {activeTab === 'system_logs' && (
-            <div className="space-y-4">
-              <div className="p-4 rounded-2xl bg-slate-900 text-white space-y-1.5">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2 text-xs font-bold text-white uppercase tracking-wider">
-                    <Database className="w-4 h-4 text-amber-400" />
-                    <span>Immutable Audit Ledger (`system_logs`)</span>
-                  </div>
-                  <span className="text-[10px] font-mono text-slate-400">
-                    JSONB Metadata Enabled
-                  </span>
-                </div>
-                <p className="text-xs text-slate-400">
-                  Every state transition, fractional deduction, and digital handover produces an immutable cryptographic audit record.
-                </p>
-              </div>
-
-              <div className="space-y-2">
-                {systemLogs.length === 0 ? (
-                  <div className="text-center py-12 bg-slate-50 rounded-2xl border border-slate-200 text-xs text-slate-500">
-                    No system logs generated yet. Trigger a fractional use or digital handover to write new records.
-                  </div>
-                ) : (
-                  systemLogs.map((log) => {
-                    const isExpanded = expandedJsonLogId === log.id;
-
-                    return (
-                      <div
-                        key={log.id}
-                        className="p-4 rounded-2xl bg-white border border-slate-200 shadow-2xs space-y-2.5 transition-all"
-                      >
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-2">
-                            <span
-                              className={cn(
-                                'px-2 py-0.5 rounded-md text-[10px] font-bold font-mono tracking-wider',
-                                log.eventType === 'FRACTIONAL_USE_LOGGED'
-                                  ? 'bg-indigo-50 text-indigo-800 border border-indigo-200'
-                                  : log.eventType === 'HANDOVER_COMPLETED'
-                                  ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
-                                  : 'bg-slate-100 text-slate-800 border border-slate-200'
-                              )}
-                            >
-                              {log.eventType}
-                            </span>
-                            <span className="text-xs font-bold text-slate-800">
-                              Target ID: <code className="text-slate-600">{log.targetId}</code>
-                            </span>
-                          </div>
-
-                          <div className="flex items-center gap-3 text-right">
-                            <span className="text-[11px] text-slate-400 font-mono">
-                              {new Date(log.createdAt).toLocaleTimeString()}
-                            </span>
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setExpandedJsonLogId(isExpanded ? null : log.id)
-                              }
-                              className="text-[11px] text-slate-600 hover:text-slate-900 font-medium inline-flex items-center gap-1 cursor-pointer bg-slate-100 hover:bg-slate-200 px-2 py-1 rounded-md"
-                            >
-                              <FileJson className="w-3.5 h-3.5 text-indigo-600" />
-                              <span>{isExpanded ? 'Hide JSONB' : 'Inspect JSONB'}</span>
-                            </button>
-                          </div>
-                        </div>
-
-                        {/* Expandable JSONB context viewer */}
-                        {isExpanded && (
-                          <div className="p-3 rounded-xl bg-slate-900 border border-slate-800 text-[11px] font-mono text-emerald-400 overflow-x-auto">
-                            <pre>{JSON.stringify(log.metadata, null, 2)}</pre>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })
-                )}
-              </div>
-            </div>
-          )}
+                    <time dateTime={item.createdAt} className="text-[11px] text-slate-400 whitespace-nowrap">
+                      {relativeTime(item.createdAt)}
+                    </time>
+                  </li>
+                ))}
+              </ol>
+            ))}
         </div>
       </div>
     </div>

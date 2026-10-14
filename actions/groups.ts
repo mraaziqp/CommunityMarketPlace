@@ -1,4 +1,3 @@
-'use server';
 
 import { db, memoryStore } from '../db';
 import {
@@ -70,7 +69,11 @@ function generateInviteCode(name: string): string {
 export async function createTrustGroup(
   input: CreateTrustGroupInput
 ): Promise<CreateGroupResult> {
-  const { name, description = '', icon = 'ShieldCheck', adminId = 'usr_me' } = input;
+  const { name, description = '', icon = 'ShieldCheck', adminId } = input;
+
+  if (!adminId || !memoryStore.users.has(adminId)) {
+    throw new Error('Please sign in to start a circle.');
+  }
 
   if (!name || name.trim().length < 3) {
     throw new Error('Group name must be at least 3 characters long');
@@ -175,7 +178,7 @@ export async function createTrustGroup(
  */
 export async function joinTrustGroup(
   inviteCode: string,
-  userId: string = 'usr_me'
+  userId: string
 ): Promise<JoinGroupResult> {
   if (!inviteCode || !inviteCode.trim()) {
     throw new Error('Please enter a valid invite code');
@@ -190,7 +193,7 @@ export async function joinTrustGroup(
     );
 
     if (!group) {
-      throw new Error(`No Trust Group found with invite code "${cleanCode}". Please verify code with the group admin.`);
+      throw new Error("That code didn't match any circle. Please check it with a member.");
     }
 
     // 2. Check if already a member
@@ -308,7 +311,11 @@ export async function joinTrustGroup(
 /**
  * Server Action: Get all trust groups with membership status for current user
  */
-export async function getTrustGroups(userId: string = 'usr_me'): Promise<TrustGroupModel[]> {
+export async function getTrustGroups(userId: string | null): Promise<TrustGroupModel[]> {
+  const memberCounts = new Map<string, number>();
+  for (const m of memoryStore.groupMemberships.values()) {
+    if (m.status === 'ACTIVE') memberCounts.set(m.groupId, (memberCounts.get(m.groupId) ?? 0) + 1);
+  }
   const userMemberships = new Set(
     Array.from(memoryStore.groupMemberships.values())
       .filter((m) => m.userId === userId && m.status === 'ACTIVE')
@@ -321,11 +328,12 @@ export async function getTrustGroups(userId: string = 'usr_me'): Promise<TrustGr
       id: g.id,
       name: g.name,
       description: g.description,
-      inviteCode: g.inviteCode,
+      // Invite codes are only given to people already in the circle.
+      inviteCode: userMemberships.has(g.id) ? g.inviteCode : '',
       adminId: g.adminId,
       adminName: adminUser ? adminUser.name : 'Co-Op Admin',
       icon: g.icon,
-      memberCount: g.memberCount,
+      memberCount: memberCounts.get(g.id) ?? 0,
       isCurrentUserMember: userMemberships.has(g.id),
       createdAt: g.createdAt.toISOString(),
       updatedAt: g.updatedAt.toISOString(),
@@ -338,7 +346,8 @@ export async function getTrustGroups(userId: string = 'usr_me'): Promise<TrustGr
 /**
  * Server Action: Get list of group IDs current user is a verified member of
  */
-export async function getUserMemberGroupIds(userId: string = 'usr_me'): Promise<string[]> {
+export async function getUserMemberGroupIds(userId: string | null): Promise<string[]> {
+  if (!userId) return [];
   return Array.from(memoryStore.groupMemberships.values())
     .filter((m) => m.userId === userId && m.status === 'ACTIVE')
     .map((m) => m.groupId);

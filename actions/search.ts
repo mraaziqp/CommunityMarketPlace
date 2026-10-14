@@ -1,15 +1,9 @@
-'use server';
-
-import { db, memoryStore } from '../db';
-import { listings, categories, type Listing } from '../db/schema';
-import { sql, eq, and, ilike, or, gte } from 'drizzle-orm';
 import {
   GeospatialSearchParams,
   SearchResultModel,
   ListingModel,
 } from '../src/types';
 import { getCategoryAndChildrenIds } from '../src/data/mockCategories';
-import { INITIAL_LISTINGS } from '../src/data/mockListings';
 import { getListings } from './listings';
 
 /**
@@ -85,31 +79,8 @@ export async function searchListings(
     !isNaN(latitude) &&
     !isNaN(longitude);
 
-  // 1. Gather all candidates from Neon PostgreSQL / Drizzle DB
-  let candidateListings: ListingModel[] = [];
-  try {
-    const liveFromDb = await getListings({
-      categoryId,
-      categorySlug,
-      city,
-      pricingType,
-    });
-    if (liveFromDb && liveFromDb.length > 0) {
-      candidateListings = liveFromDb;
-    }
-  } catch (dbErr) {
-    console.warn('Real-time database listings fetch fallback:', dbErr);
-  }
-
-  if (candidateListings.length === 0) {
-    candidateListings = [...INITIAL_LISTINGS];
-    if (memoryStore?.listings && memoryStore.listings.size > 0) {
-      const memList: ListingModel[] = Array.from(memoryStore.listings.values()) as any;
-      if (memList.length > 0) {
-        candidateListings = memList;
-      }
-    }
-  }
+  // 1. Every available listing in the store
+  const candidateListings: ListingModel[] = await getListings();
 
   // 2. Perform filtering
   let filtered = candidateListings.filter((item) => {
@@ -237,10 +208,10 @@ export async function searchListings(
       }
       if (a.distanceKm !== null) return -1;
       if (b.distanceKm !== null) return 1;
-      return b.rating - a.rating;
+      return (b.rating ?? 0) - (a.rating ?? 0);
     });
   } else {
-    processedListings.sort((a, b) => b.rating - a.rating);
+    processedListings.sort((a, b) => (b.rating ?? 0) - (a.rating ?? 0));
   }
 
   const paginatedListings = processedListings.slice(offset, offset + limit);

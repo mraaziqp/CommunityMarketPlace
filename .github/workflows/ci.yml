@@ -1,0 +1,56 @@
+name: CI
+
+# Typecheck, the server integration tests (embedded Postgres, simulated
+# PayFast notifications) and the production build.
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Typecheck, test & build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      # `npm run build` already runs `tsc --noEmit` first; this reports the
+      # typecheck as its own step so a type error is obvious in the summary.
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Server integration tests
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Check the bundle carries no server or database references
+        run: |
+          # dist/ is served to every visitor. Server code or a credential here
+          # would be readable by anyone.
+          if grep -rlE 'DATABASE_URL|PAYFAST_PASSPHRASE|BOT_API_KEYS|scrypt|drizzle-orm|postgres-js' dist/; then
+            echo "Server/database references found in the built bundle." >&2
+            exit 1
+          fi
+          echo "Bundle is clean."
+
+      - name: Check the PWA icons the manifest references were built
+        run: |
+          for icon in icon-192.png icon-512.png icon-maskable-512.png; do
+            test -f "dist/icons/$icon" || { echo "Missing dist/icons/$icon" >&2; exit 1; }
+          done
+          echo "All manifest icons present."

@@ -8,3 +8,5 @@ coverage/
 !.env.example
 !.env.production.example
 
+dist-server/
+.data/

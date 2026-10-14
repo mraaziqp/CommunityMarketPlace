@@ -1,370 +1,531 @@
-import { neon, neonConfig } from '@neondatabase/serverless';
-import { drizzle } from 'drizzle-orm/neon-http';
 import * as schema from './schema';
-import { eq, and, sql } from 'drizzle-orm';
+import { INITIAL_LISTINGS } from '../src/data/mockListings';
 
 /**
  * ============================================================================
- * SHAREHUB DATABASE CLIENT — STATELESS NEON SERVERLESS POSTGRESQL & DRIZZLE ORM
- * 
- * Performance & Connection Safety Guarantees:
- * 1. Stateless Edge HTTP Driver: Queries execute over lightweight HTTPS payloads (neon()),
- *    preventing TCP/WebSocket connection pool exhaustion in serverless edge/lambda environments.
- * 2. Pooler Endpoint & SSL Enforcement: Automatically normalizes database connection strings
- *    to include '?sslmode=require' and pooler flags.
- * 3. Connection Cache: Configures neonConfig.fetchConnectionCache = true for low-latency reuse.
- * 4. Zero-Leak Fallback Memory Engine: Provides transactional snapshot rollbacks for local dev/preview.
+ * SHAREHUB DATA LAYER — SERVER STORE WITH POSTGRES WRITE-THROUGH
+ *
+ * The server keeps the working set in typed Maps (fast, synchronous business
+ * logic) and Postgres is the system of record:
+ *
+ * 1. On boot, every table is loaded into memory (`hydrate`).
+ * 2. Mutations mark records dirty. `runExclusive` wraps each write request:
+ *    it runs the action, then `commit` writes every dirty record to Postgres
+ *    in one database transaction. If the action or the commit fails, memory
+ *    is restored to its pre-request snapshot, so memory and database never
+ *    diverge.
+ * 3. Write requests run one at a time (a single-writer mutex), which keeps
+ *    the snapshot/commit sequence consistent.
+ *
+ * Consequence: run exactly ONE server instance against a database. Scaling
+ * out horizontally requires moving the actions to direct SQL first.
  * ============================================================================
  */
 
-// Enable fetch connection cache for edge and serverless environments
-if (typeof window === 'undefined') {
-  neonConfig.fetchConnectionCache = true;
+export const COLLECTIONS = [
+  'users',
+  'accounts',
+  'sessions',
+  'trustGroups',
+  'groupMemberships',
+  'listings',
+  'pricingTiers',
+  'userSubscriptions',
+  'bookings',
+  'payments',
+  'usageLogs',
+  'conditionLogs',
+  'conversations',
+  'messages',
+  'reviews',
+  'systemLogs',
+] as const;
+
+/** Parent tables before children, so upserts satisfy foreign keys (deletes run in reverse). */
+export type Collection = (typeof COLLECTIONS)[number];
+
+export type PendingWrite = { collection: Collection; id: string; record: any | null };
+
+export interface PersistenceAdapter {
+  load(): Promise<Partial<Record<Collection, any[]>>>;
+  /** Applies upserts (record set) and deletes (record null) atomically. */
+  save(writes: PendingWrite[]): Promise<void>;
 }
 
-/**
- * Normalizes connection string with proper SSL and pooling parameters
- */
-function getSanitizedDatabaseUrl(): string {
-  let url = process.env.DATABASE_URL || '';
-  if (!url) return '';
+let trackingSuspended = 0;
+const dirty = new Map<Collection, Set<string>>();
 
+function markDirty(collection: Collection, id: string) {
+  if (trackingSuspended > 0) return;
+  let ids = dirty.get(collection);
+  if (!ids) dirty.set(collection, (ids = new Set()));
+  ids.add(id);
+}
+
+function untracked<T>(fn: () => T): T {
+  trackingSuspended++;
   try {
-    // If URL lacks sslmode, append it for Neon PostgreSQL security requirement
-    if (url.startsWith('postgres://') || url.startsWith('postgresql://')) {
-      if (!url.includes('sslmode=')) {
-        const separator = url.includes('?') ? '&' : '?';
-        url = `${url}${separator}sslmode=require`;
-      }
-    }
-  } catch (e) {
-    console.warn('[Neon Connection Audit] URL normalization note:', e);
+    return fn();
+  } finally {
+    trackingSuspended--;
   }
-  return url;
 }
 
-const connectionString = getSanitizedDatabaseUrl();
+/** A Map that records which ids changed so they can be written to Postgres. */
+export class TrackedMap<V> extends Map<string, V> {
+  collection!: Collection;
 
-// Singleton connection or in-memory transactional mock fallback for browser preview
-class MemoryStore {
-  users = new Map<string, schema.User>();
-  listings = new Map<string, schema.Listing>();
-  pricingTiers = new Map<string, schema.PricingTier>();
-  userSubscriptions = new Map<string, schema.UserSubscription>();
-  usageLogs = new Map<string, schema.UsageLog>();
-  bookings = new Map<string, schema.Booking>();
-  payments = new Map<string, schema.Payment>();
-  conditionLogs = new Map<string, schema.ConditionLog>();
-  trustGroups = new Map<string, schema.TrustGroup>();
-  groupMemberships = new Map<string, schema.GroupMembership>();
-  conversations = new Map<string, schema.Conversation>();
-  messages = new Map<string, schema.Message>();
-  reviews = new Map<string, schema.Review>();
-  systemLogs = new Map<string, schema.SystemLog>();
-
-  constructor() {
-    this.seedDefaults();
+  static create<V>(collection: Collection, source?: Iterable<[string, V]>): TrackedMap<V> {
+    const map = new TrackedMap<V>();
+    map.collection = collection;
+    if (source) untracked(() => { for (const [k, v] of source) map.set(k, v); });
+    return map;
   }
 
-  seedDefaults() {
-    // Seed initial test user
+  set(key: string, value: V): this {
+    super.set(key, value);
+    if (this.collection) markDirty(this.collection, key);
+    return this;
+  }
+
+  delete(key: string): boolean {
+    const removed = super.delete(key);
+    if (removed && this.collection) markDirty(this.collection, key);
+    return removed;
+  }
+
+  clear(): void {
+    if (this.collection) for (const key of this.keys()) markDirty(this.collection, key);
+    super.clear();
+  }
+}
+
+class MemoryStore {
+  users = TrackedMap.create<schema.User>('users');
+  accounts = TrackedMap.create<typeof schema.accounts.$inferSelect>('accounts');
+  sessions = TrackedMap.create<typeof schema.sessions.$inferSelect>('sessions');
+  trustGroups = TrackedMap.create<schema.TrustGroup>('trustGroups');
+  groupMemberships = TrackedMap.create<schema.GroupMembership>('groupMemberships');
+  listings = TrackedMap.create<schema.Listing>('listings');
+  pricingTiers = TrackedMap.create<schema.PricingTier>('pricingTiers');
+  userSubscriptions = TrackedMap.create<schema.UserSubscription>('userSubscriptions');
+  bookings = TrackedMap.create<schema.Booking>('bookings');
+  payments = TrackedMap.create<schema.Payment>('payments');
+  usageLogs = TrackedMap.create<schema.UsageLog>('usageLogs');
+  conditionLogs = TrackedMap.create<schema.ConditionLog>('conditionLogs');
+  conversations = TrackedMap.create<schema.Conversation>('conversations');
+  messages = TrackedMap.create<schema.Message>('messages');
+  reviews = TrackedMap.create<schema.Review>('reviews');
+  systemLogs = TrackedMap.create<schema.SystemLog>('systemLogs');
+
+  private adapter: PersistenceAdapter | null = null;
+  private queue: Promise<unknown> = Promise.resolve();
+  /** Called with records created or changed by each successful commit (outbound webhooks). */
+  onCommitted: ((writes: PendingWrite[]) => void) | null = null;
+
+  collection(name: Collection): TrackedMap<any> {
+    return (this as any)[name] as TrackedMap<any>;
+  }
+
+  /** Loads every table from Postgres into memory. */
+  async hydrate(adapter: PersistenceAdapter) {
+    this.adapter = adapter;
+    const data = await adapter.load();
+    untracked(() => {
+      for (const name of COLLECTIONS) {
+        const map = this.collection(name);
+        map.clear();
+        for (const row of data[name] ?? []) map.set(row.id, row);
+      }
+    });
+    dirty.clear();
+  }
+
+  isEmpty() {
+    return this.users.size === 0 && this.listings.size === 0;
+  }
+
+  /** Writes all dirty records to Postgres in one transaction. */
+  async commit() {
+    const writes: PendingWrite[] = [];
+    for (const name of COLLECTIONS) {
+      const ids = dirty.get(name);
+      if (!ids) continue;
+      const map = this.collection(name);
+      for (const id of ids) writes.push({ collection: name, id, record: map.get(id) ?? null });
+    }
+    if (writes.length === 0) return;
+    if (this.adapter) await this.adapter.save(writes);
+    dirty.clear();
+    this.onCommitted?.(writes);
+  }
+
+  private snapshot() {
+    const copy = {} as Record<Collection, Map<string, any>>;
+    for (const name of COLLECTIONS) copy[name] = new Map(this.collection(name));
+    return { copy, dirty: new Map(Array.from(dirty, ([k, v]) => [k, new Set(v)])) };
+  }
+
+  private restore(snap: ReturnType<MemoryStore['snapshot']>) {
+    untracked(() => {
+      for (const name of COLLECTIONS) {
+        const map = this.collection(name);
+        Map.prototype.clear.call(map);
+        for (const [k, v] of snap.copy[name]) Map.prototype.set.call(map, k, v);
+      }
+    });
+    dirty.clear();
+    for (const [k, v] of snap.dirty) dirty.set(k, v);
+  }
+
+  /**
+   * Runs a write as a unit of work: one writer at a time, committed to
+   * Postgres on success, fully rolled back in memory on any failure.
+   */
+  runExclusive<T>(fn: () => Promise<T> | T): Promise<T> {
+    const run = async () => {
+      const snap = this.snapshot();
+      try {
+        const result = await fn();
+        await this.commit();
+        return result;
+      } catch (err) {
+        this.restore(snap);
+        throw err;
+      }
+    };
+    const next = this.queue.then(run, run);
+    this.queue = next.catch(() => undefined);
+    return next;
+  }
+
+  /** Deletes everything (tests only). */
+  resetForTests() {
+    untracked(() => {
+      for (const name of COLLECTIONS) this.collection(name).clear();
+    });
+    dirty.clear();
+  }
+
+  /** Demo neighbourhood for development and demos. Never seeded in production. */
+  seedDemoData({ includeAdmin }: { includeAdmin: boolean }) {
+    const now = new Date();
+    const dayMs = 24 * 60 * 60 * 1000;
+    const daysFromNow = (days: number, hour = 9) => {
+      const d = new Date(now.getTime() + days * dayMs);
+      d.setHours(hour, 0, 0, 0);
+      return d;
+    };
+    const periodStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const periodEnd = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+
+    // Every host in the demo catalogue is a real user record, so a listing's
+    // owner can be looked up, reviewed, and signed in as in development.
+    for (const item of INITIAL_LISTINGS) {
+      if (this.users.has(item.owner.id)) continue;
+      const [first, ...rest] = item.owner.name.toLowerCase().split(' ');
+      this.users.set(item.owner.id, {
+        id: item.owner.id,
+        name: item.owner.name,
+        email: `${first}.${rest.join('') || 'host'}@sharehub.example`,
+        emailVerified: true,
+        role: item.owner.isSuperHost ? 'VERIFIED_HOST' : 'USER',
+        image: item.owner.image,
+        phoneNumber: null,
+        bio: null,
+        neighborhood: item.owner.neighborhood,
+        trustScore: item.owner.trustScore,
+        isHost: true,
+        suspendedAt: null,
+        createdAt: new Date('2026-01-10'),
+        updatedAt: new Date('2026-01-10'),
+      });
+    }
+
+    // The demo member whose activity (a co-op membership and two rentals) is
+    // seeded below.
     this.users.set('usr_me', {
       id: 'usr_me',
       name: 'Alex Rivera',
-      email: 'alex.rivera@community.org',
+      email: 'alex.rivera@sharehub.example',
       emailVerified: true,
-      role: 'ADMIN',
-      image: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80',
-      phoneNumber: '+27 82 555 0192',
-      bio: 'Eco-conscious neighbor & shared appliance co-op coordinator.',
+      role: 'USER',
+      image: 'https://images.unsplash.com/photo-1539571696357-5a69c17a67c6?w=150&auto=format&fit=crop&q=80',
+      phoneNumber: null,
+      bio: 'Neighbour, weekend DIYer and laundry co-op member.',
       neighborhood: 'Observatory',
-      trustScore: 98,
-      isHost: true,
+      trustScore: 97,
+      isHost: false,
+      suspendedAt: null,
       createdAt: new Date('2026-01-10'),
-      updatedAt: new Date('2026-08-20'),
+      updatedAt: new Date('2026-01-10'),
     });
 
-    this.users.set('usr_host_marcus', {
-      id: 'usr_host_marcus',
-      name: 'Marcus Thorne',
-      email: 'marcus.t@workshop-coop.za',
-      emailVerified: true,
-      role: 'VERIFIED_HOST',
-      image: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=150&auto=format&fit=crop&q=80',
-      phoneNumber: '+27 71 884 9921',
-      bio: 'Master woodworker, maker space organizer & power tool steward in Woodstock.',
-      neighborhood: 'Woodstock',
-      trustScore: 99,
-      isHost: true,
-      createdAt: new Date('2026-01-15'),
-      updatedAt: new Date('2026-08-20'),
-    });
+    // Development-only operator account for exercising the admin dashboard.
+    if (includeAdmin) {
+      this.users.set('usr_admin_01', {
+        id: 'usr_admin_01',
+        name: 'ShareHub Team',
+        email: 'admin@sharehub.example',
+        emailVerified: true,
+        role: 'ADMIN',
+        image: null,
+        phoneNumber: null,
+        bio: null,
+        neighborhood: 'City Bowl',
+        trustScore: 100,
+        isHost: false,
+        suspendedAt: null,
+        createdAt: new Date('2026-01-01'),
+        updatedAt: new Date('2026-01-01'),
+      });
+    }
 
-    // Seed default fractional washing machine subscription
-    this.userSubscriptions.set('sub_init_wm', {
-      id: 'sub_init_wm',
+    for (const item of INITIAL_LISTINGS) {
+      this.listings.set(item.id, {
+        id: item.id,
+        title: item.title,
+        description: item.description,
+        category: item.category as any,
+        categoryId: item.categoryId || null,
+        ownerId: item.owner.id,
+        address: item.address,
+        neighborhood: item.neighborhood,
+        city: item.city,
+        latitude: item.latitude != null ? String(item.latitude) : null,
+        longitude: item.longitude != null ? String(item.longitude) : null,
+        images: item.images,
+        rules: item.rules || null,
+        depositRequiredInCents: item.depositRequiredInCents,
+        maxSubscribers: item.maxSubscribers,
+        currentSubscribersCount: item.currentSubscribersCount,
+        isAvailable: item.isAvailable,
+        visibilityGroupId: item.visibilityGroupId || null,
+        accessMethod: item.accessMethod,
+        createdAt: new Date('2026-02-01'),
+        updatedAt: new Date('2026-02-01'),
+      });
+
+      for (const tier of item.pricingTiers) {
+        this.pricingTiers.set(tier.id, {
+          id: tier.id,
+          listingId: item.id,
+          name: tier.name,
+          description: tier.description || null,
+          type: tier.type as any,
+          priceInCents: tier.priceInCents,
+          currency: tier.currency,
+          usageLimitPerPeriod: tier.usageLimitPerPeriod ?? null,
+          periodUnit: tier.periodUnit as any,
+          periodDuration: tier.periodDuration,
+          maxActiveSubscribers: tier.maxActiveSubscribers ?? null,
+          isPopular: tier.isPopular || false,
+          isActive: tier.isActive,
+          createdAt: new Date('2026-02-01'),
+        });
+      }
+    }
+
+    // Alex is one of the households in the Observatory washer co-op (the
+    // listing's seeded subscriber count already includes them).
+    const washer = INITIAL_LISTINGS.find((l) => l.id === 'list_wm_001')!;
+    const washerTier = washer.pricingTiers[0];
+    this.userSubscriptions.set('sub_demo_washer', {
+      id: 'sub_demo_washer',
       userId: 'usr_me',
-      listingId: 'list_wm_001',
-      pricingTierId: 'tier_wm_10uses',
+      listingId: washer.id,
+      pricingTierId: washerTier.id,
       status: 'active',
-      remainingUsesThisPeriod: 7,
-      totalUsesUsed: 3,
-      currentPeriodStart: new Date('2026-08-01'),
-      currentPeriodEnd: new Date('2026-08-31'),
-      renewsAt: new Date('2026-09-01'),
+      remainingUsesThisPeriod: (washerTier.usageLimitPerPeriod || 10) - 2,
+      totalUsesUsed: 2,
+      currentPeriodStart: periodStart,
+      currentPeriodEnd: periodEnd,
+      renewsAt: periodEnd,
       cancelledAt: null,
-      stripeSubscriptionId: 'sub_stripe_mock_8842',
-      createdAt: new Date('2026-08-01'),
-      updatedAt: new Date('2026-08-20'),
+      stripeSubscriptionId: null,
+      gatewayToken: null,
+      createdAt: new Date('2026-06-01'),
+      updatedAt: now,
     });
 
-    // Seed default booking for handover
-    this.bookings.set('book_drill_001', {
-      id: 'book_drill_001',
-      listingId: 'list_drill_002',
+    const cycles = [
+      { id: 'usage_demo_1', at: new Date(periodStart.getTime() + 8 * 3600000), notes: 'Cotton 40°C (60 min)' },
+      { id: 'usage_demo_2', at: new Date(periodStart.getTime() + 18 * 3600000), notes: 'Quick wash 30°C (15 min)' },
+    ];
+    for (const cycle of cycles) {
+      this.usageLogs.set(cycle.id, {
+        id: cycle.id,
+        subscriptionId: 'sub_demo_washer',
+        listingId: washer.id,
+        userId: 'usr_me',
+        startedAt: cycle.at,
+        endedAt: null,
+        unitsUsed: 1,
+        status: 'completed',
+        notes: cycle.notes,
+        verificationCode: null,
+        createdAt: cycle.at,
+      });
+      this.systemLogs.set(`log_${cycle.id}`, {
+        id: `log_${cycle.id}`,
+        eventType: 'FRACTIONAL_USE_LOGGED',
+        userId: 'usr_me',
+        targetId: 'sub_demo_washer',
+        metadata: { listingId: washer.id, listingTitle: washer.title, notes: cycle.notes },
+        createdAt: cycle.at,
+      });
+    }
+
+    // An upcoming, already-paid rental waiting for pickup.
+    const scanner = INITIAL_LISTINGS.find((l) => l.id === 'list_obd_001')!;
+    const scannerTier = scanner.pricingTiers[0];
+    this.bookings.set('book_demo_scanner', {
+      id: 'book_demo_scanner',
+      listingId: scanner.id,
       renterId: 'usr_me',
-      pricingTierId: 'tier_drill_day',
+      pricingTierId: scannerTier.id,
       status: 'PENDING_HANDOVER',
       disputeStatus: 'NONE',
       returnConditionLogId: null,
-      verificationCode: 'HANDOVER-8842',
-      totalAmountInCents: 15000,
-      depositAmountInCents: 50000,
-      startDate: new Date('2026-08-21T09:00:00'),
-      endDate: new Date('2026-08-23T18:00:00'),
+      verificationCode: 'PICKUP-4821',
+      totalAmountInCents: scannerTier.priceInCents * 2,
+      depositAmountInCents: scanner.depositRequiredInCents,
+      startDate: daysFromNow(1, 9),
+      endDate: daysFromNow(3, 9),
       handoverCompletedAt: null,
-      handoverNotes: 'Includes 2x 4.0Ah batteries and SDS bit set',
-      createdAt: new Date('2026-08-20T14:30:00'),
-      updatedAt: new Date('2026-08-20T14:30:00'),
+      handoverNotes: null,
+      createdAt: daysFromNow(-1, 14),
+      updatedAt: daysFromNow(-1, 14),
     });
-
-    // Seed initial Escrow Payment for book_drill_001
-    this.payments.set('pay_escrow_drill_001', {
-      id: 'pay_escrow_drill_001',
-      bookingId: 'book_drill_001',
-      amount: 65000, // Total rental (15000) + Deposit (50000) = R650.00
+    this.payments.set('pay_demo_scanner', {
+      id: 'pay_demo_scanner',
+      kind: 'booking',
+      bookingId: 'book_demo_scanner',
+      subscriptionId: null,
+      payerId: 'usr_me',
+      provider: 'demo',
+      hostPayoutStatus: 'none',
+      hostPayoutInCents: 0,
+      depositRefundStatus: 'none',
+      amount: scannerTier.priceInCents * 2 + scanner.depositRequiredInCents,
       currency: 'ZAR',
       status: 'HELD_IN_ESCROW',
-      paymentGatewayRef: 'pstk_auth_escrow_884291',
+      paymentGatewayRef: null,
+      gatewayToken: null,
       escrowReleasedAt: null,
-      createdAt: new Date('2026-08-20T14:31:00'),
-      updatedAt: new Date('2026-08-20T14:31:00'),
+      createdAt: daysFromNow(-1, 14),
+      updatedAt: daysFromNow(-1, 14),
+    });
+    this.systemLogs.set('log_demo_scanner_booked', {
+      id: 'log_demo_scanner_booked',
+      eventType: 'BOOKING_CREATED',
+      userId: 'usr_me',
+      targetId: 'book_demo_scanner',
+      metadata: { listingId: scanner.id, listingTitle: scanner.title },
+      createdAt: daysFromNow(-1, 14),
     });
 
-    // Seed initial Conversation between Alex (renter) and Marcus (host)
-    this.conversations.set('conv_drill_001', {
-      id: 'conv_drill_001',
-      listingId: 'list_drill_002',
+    // A finished rental that has not been reviewed yet.
+    const cargoBox = INITIAL_LISTINGS.find((l) => l.id === 'list_thule_001')!;
+    const cargoTier = cargoBox.pricingTiers[0];
+    this.bookings.set('book_demo_cargo', {
+      id: 'book_demo_cargo',
+      listingId: cargoBox.id,
       renterId: 'usr_me',
-      hostId: 'usr_host_marcus',
-      lastMessageAt: new Date('2026-08-20T15:10:00'),
-      createdAt: new Date('2026-08-20T14:45:00'),
-      updatedAt: new Date('2026-08-20T15:10:00'),
+      pricingTierId: cargoTier.id,
+      status: 'COMPLETED',
+      disputeStatus: 'NONE',
+      returnConditionLogId: null,
+      verificationCode: 'PICKUP-1937',
+      totalAmountInCents: cargoTier.priceInCents * 3,
+      depositAmountInCents: cargoBox.depositRequiredInCents,
+      startDate: daysFromNow(-12, 8),
+      endDate: daysFromNow(-9, 8),
+      handoverCompletedAt: daysFromNow(-12, 8),
+      handoverNotes: null,
+      createdAt: daysFromNow(-15, 11),
+      updatedAt: daysFromNow(-9, 10),
     });
-
-    // Seed initial Messages in the thread
-    this.messages.set('msg_001', {
-      id: 'msg_001',
-      conversationId: 'conv_drill_001',
-      senderId: 'usr_me',
-      content: 'Hi Marcus! Just booked the DeWalt Hammer Drill for tomorrow morning. Does it come with concrete drill bits?',
-      readAt: new Date('2026-08-20T14:50:00'),
-      createdAt: new Date('2026-08-20T14:46:00'),
-    });
-
-    this.messages.set('msg_002', {
-      id: 'msg_002',
-      conversationId: 'conv_drill_001',
-      senderId: 'usr_host_marcus',
-      content: 'Hey Alex! Yes, it includes 6mm, 8mm, and 10mm SDS-plus masonry bits, plus the grease tube and 2 fully charged 4.0Ah batteries. I am at the Woodstock workshop from 8:30 AM.',
-      readAt: new Date('2026-08-20T14:55:00'),
-      createdAt: new Date('2026-08-20T14:52:00'),
-    });
-
-    this.messages.set('msg_003', {
-      id: 'msg_003',
-      conversationId: 'conv_drill_001',
-      senderId: 'usr_me',
-      content: 'Perfect! I will be there at 9:00 AM sharp with the Digital Handover code ready.',
-      readAt: new Date('2026-08-20T15:12:00'),
-      createdAt: new Date('2026-08-20T15:10:00'),
-    });
-
-    // Seed sample completed review
-    this.reviews.set('rev_init_001', {
-      id: 'rev_init_001',
-      bookingId: 'book_drill_001',
-      reviewerId: 'usr_me',
-      targetId: 'usr_host_marcus',
-      listingId: 'list_drill_002',
-      rating: 5,
-      comment: 'Top quality equipment and flawless handover! Marcus had the batteries charged to 100% and gave great tips for drilling into hard Victorian brickwork.',
-      cleanlinessRating: 5,
-      communicationRating: 5,
-      accuracyRating: 5,
-      createdAt: new Date('2026-08-18T16:00:00'),
-    });
-
-    // Seed initial Private Trust Groups
-    this.trustGroups.set('grp_woodstock_coop', {
-      id: 'grp_woodstock_coop',
-      name: 'Woodstock Makers Co-Op',
-      description: 'Exclusive community sharing of high-grade power tools, CNC gear, and workshop space for verified Woodstock artisans.',
-      inviteCode: 'WDSTCK-88',
-      adminId: 'usr_host_marcus',
-      icon: 'Hammer',
-      memberCount: 14,
-      createdAt: new Date('2026-02-01'),
-      updatedAt: new Date('2026-08-20'),
-    });
-
-    this.trustGroups.set('grp_obs_ecovillage', {
-      id: 'grp_obs_ecovillage',
-      name: 'Observatory Eco-Village',
-      description: 'Zero-waste neighborhood cluster sharing solar batteries, electric lawncare tools, and commercial food processors.',
-      inviteCode: 'OBSECO-42',
-      adminId: 'usr_me',
-      icon: 'ShieldCheck',
-      memberCount: 22,
-      createdAt: new Date('2026-01-20'),
-      updatedAt: new Date('2026-08-20'),
-    });
-
-    this.trustGroups.set('grp_uct_innovation', {
-      id: 'grp_uct_innovation',
-      name: 'UCT Design & Hardware Lab',
-      description: 'University research guild sharing 3D printers, VR headsets, micro-soldering stations, and studio mics.',
-      inviteCode: 'UCTDES-99',
-      adminId: 'usr_me',
-      icon: 'Cpu',
-      memberCount: 38,
-      createdAt: new Date('2026-03-10'),
-      updatedAt: new Date('2026-08-20'),
-    });
-
-    // Seed memberships for Alex (usr_me)
-    this.groupMemberships.set('mem_001', {
-      id: 'mem_001',
-      groupId: 'grp_obs_ecovillage',
-      userId: 'usr_me',
-      status: 'ACTIVE',
-      joinedAt: new Date('2026-01-20'),
-    });
-
-    this.groupMemberships.set('mem_002', {
-      id: 'mem_002',
-      groupId: 'grp_woodstock_coop',
-      userId: 'usr_me',
-      status: 'ACTIVE',
-      joinedAt: new Date('2026-02-15'),
-    });
-
-    this.groupMemberships.set('mem_003', {
-      id: 'mem_003',
-      groupId: 'grp_uct_innovation',
-      userId: 'usr_me',
-      status: 'ACTIVE',
-      joinedAt: new Date('2026-03-10'),
-    });
-
-    // Seed initial listings and pricing tiers into memoryStore
-    this.listings.set('list_wm_001', {
-      id: 'list_wm_001',
-      title: 'Bosch Serie 8 (9kg) High-Efficiency Washer Co-Op',
-      description: 'Shared luxury eco-silent front loader located in secure communal laundry bay (Unit 4B). Subscriptions are strictly capped at 4 households to ensure zero queueing and pristine maintenance. Includes eco-detergent dispenser and smart WiFi cycle notifications.',
-      category: 'fractional_appliance' as any,
-      categoryId: 'cat_washers',
-      ownerId: 'usr_me',
-      address: '42 Trill Road, Complex Courtyard',
-      neighborhood: 'Observatory',
-      city: 'Cape Town',
-      latitude: '-33.9360',
-      longitude: '18.4715',
-      location: null,
-      images: [
-        'https://images.unsplash.com/photo-1626806787461-102c1bfaaea1?w=800&auto=format&fit=crop&q=80',
-        'https://images.unsplash.com/photo-1582735689369-4fe89db7114c?w=800&auto=format&fit=crop&q=80',
-      ],
-      rules: 'No heavy muddy boots. Please leave the door ajar after cycles. Automatic detergent dispenser provided.',
-      depositRequiredInCents: 20000,
-      maxSubscribers: 4,
-      currentSubscribersCount: 3,
-      isAvailable: true,
-      visibilityGroupId: 'grp_obs_ecovillage',
-      accessMethod: 'smart_plug',
-      createdAt: new Date('2026-08-01'),
-      updatedAt: new Date('2026-08-20'),
-    });
-
-    this.pricingTiers.set('tier_wm_10uses', {
-      id: 'tier_wm_10uses',
-      listingId: 'list_wm_001',
-      name: 'Standard Co-Op (10 Cycles)',
-      description: 'Ideal for single individuals or couples doing 2-3 loads per week.',
-      type: 'monthly_subscription' as any,
-      priceInCents: 45000,
+    this.payments.set('pay_demo_cargo', {
+      id: 'pay_demo_cargo',
+      kind: 'booking',
+      bookingId: 'book_demo_cargo',
+      subscriptionId: null,
+      payerId: 'usr_me',
+      provider: 'demo',
+      hostPayoutStatus: 'done',
+      hostPayoutInCents: Math.round(cargoTier.priceInCents * 3 * 0.9),
+      depositRefundStatus: 'done',
+      amount: cargoTier.priceInCents * 3 + cargoBox.depositRequiredInCents,
       currency: 'ZAR',
-      usageLimitPerPeriod: 10,
-      periodUnit: 'month' as any,
-      periodDuration: 1,
-      maxActiveSubscribers: 4,
-      isPopular: true,
-      isActive: true,
-      createdAt: new Date('2026-08-01'),
+      status: 'CAPTURED',
+      paymentGatewayRef: null,
+      gatewayToken: null,
+      escrowReleasedAt: daysFromNow(-9, 10),
+      createdAt: daysFromNow(-15, 11),
+      updatedAt: daysFromNow(-9, 10),
+    });
+    this.systemLogs.set('log_demo_cargo_returned', {
+      id: 'log_demo_cargo_returned',
+      eventType: 'HANDOVER_COMPLETED',
+      userId: cargoBox.owner.id,
+      targetId: 'book_demo_cargo',
+      metadata: { listingId: cargoBox.id, listingTitle: cargoBox.title, stage: 'return', conditionStatus: 'GOOD' },
+      createdAt: daysFromNow(-9, 10),
     });
 
-    this.listings.set('list_drill_002', {
-      id: 'list_drill_002',
-      title: 'DeWalt 18V XR Brushless SDS-Plus Rotary Hammer Drill Kit',
-      description: 'Heavy duty 2.1 Joules rotary hammer with 2x 4.0Ah batteries, multi-voltage charger, anti-vibration handle, depth stop, and heavy duty TSTAK kitbox. Perfect for masonry, concrete anchors, and core drilling.',
-      category: 'physical_item' as any,
-      categoryId: 'cat_tools',
-      ownerId: 'usr_host_marcus',
-      address: 'Woodstock Makerspace, 187 Sir Lowry Rd',
-      neighborhood: 'Woodstock',
-      city: 'Cape Town',
-      latitude: '-33.9298',
-      longitude: '18.4485',
-      location: null,
-      images: [
-        'https://images.unsplash.com/photo-1504148455328-c376907d081c?w=800&auto=format&fit=crop&q=80',
-        'https://images.unsplash.com/photo-1572981779307-38b8cabb2407?w=800&auto=format&fit=crop&q=80',
-      ],
-      rules: 'Return batteries fully recharged. Use supplied grease on SDS shank bits.',
-      depositRequiredInCents: 50000,
-      maxSubscribers: 1,
-      currentSubscribersCount: 1,
-      isAvailable: true,
-      visibilityGroupId: 'grp_woodstock_coop',
-      accessMethod: 'host_handover',
-      createdAt: new Date('2026-08-05'),
-      updatedAt: new Date('2026-08-20'),
-    });
-
-    this.pricingTiers.set('tier_drill_day', {
-      id: 'tier_drill_day',
-      listingId: 'list_drill_002',
-      name: 'Day Pass (24 Hours)',
-      description: 'Full day equipment rental with battery swap support.',
-      type: 'daily' as any,
-      priceInCents: 15000,
-      currency: 'ZAR',
-      usageLimitPerPeriod: null,
-      periodUnit: 'day' as any,
-      periodDuration: 1,
-      maxActiveSubscribers: 1,
-      isPopular: true,
-      isActive: true,
-      createdAt: new Date('2026-08-05'),
-    });
-
-    // Seed memberships for Marcus (usr_host_marcus)
-    this.groupMemberships.set('mem_004', {
-      id: 'mem_004',
-      groupId: 'grp_woodstock_coop',
-      userId: 'usr_host_marcus',
-      status: 'ACTIVE',
-      joinedAt: new Date('2026-02-01'),
+    // Private circles. Member counts are derived from memberships at read
+    // time; the stored figure is only a cache.
+    const groups = [
+      {
+        id: 'grp_obs_ecovillage',
+        name: 'Observatory Eco-Village',
+        description: 'Neighbours in Observatory sharing laundry, solar power and garden tools.',
+        inviteCode: 'OBSECO-42',
+        adminId: 'usr_sarah',
+        icon: 'ShieldCheck',
+      },
+      {
+        id: 'grp_woodstock_coop',
+        name: 'Woodstock Makers Co-Op',
+        description: 'Makers and artisans sharing power tools, printers and workshop space.',
+        inviteCode: 'WDSTCK-88',
+        adminId: 'usr_elena',
+        icon: 'Hammer',
+      },
+      {
+        id: 'grp_uct_innovation',
+        name: 'UCT Design & Hardware Lab',
+        description: 'Students and researchers sharing 3D printers, soldering stations and studio mics.',
+        inviteCode: 'UCTDES-99',
+        adminId: 'usr_thandeka',
+        icon: 'Cpu',
+      },
+    ];
+    const memberships: [string, string][] = [
+      ['grp_obs_ecovillage', 'usr_sarah'],
+      ['grp_obs_ecovillage', 'usr_me'],
+      ['grp_woodstock_coop', 'usr_elena'],
+      ['grp_woodstock_coop', 'usr_johan'],
+      ['grp_woodstock_coop', 'usr_me'],
+      ['grp_uct_innovation', 'usr_thandeka'],
+    ];
+    for (const g of groups) {
+      this.trustGroups.set(g.id, {
+        ...g,
+        memberCount: memberships.filter(([groupId]) => groupId === g.id).length,
+        createdAt: new Date('2026-02-01'),
+        updatedAt: new Date('2026-02-01'),
+      });
+    }
+    memberships.forEach(([groupId, userId], i) => {
+      this.groupMemberships.set(`mem_seed_${i}`, {
+        id: `mem_seed_${i}`,
+        groupId,
+        userId,
+        status: 'ACTIVE',
+        joinedAt: new Date('2026-02-15'),
+      });
     });
   }
 }
@@ -372,201 +533,32 @@ class MemoryStore {
 export const memoryStore = new MemoryStore();
 
 /**
- * Creates or gets the Drizzle DB instance
+ * Drizzle-shaped facade kept so action code reads like data access. Filtered
+ * reads and updates cannot be evaluated against the Maps, so they fail loudly
+ * instead of silently acting on whichever record happens to be first.
+ * `transaction` is a pass-through: atomicity comes from `runExclusive`.
  */
-function createDbInstance() {
-  if (connectionString && connectionString.startsWith('postgres')) {
-    const sqlClient = neon(connectionString);
-    return drizzle(sqlClient, { schema });
-  }
-
-  // Transactional simulation engine conforming to Drizzle API
-  const queryEngine = {
-    listings: {
-      findMany: async ({ where, with: relations }: any = {}) => {
-        const results = Array.from(memoryStore.listings.values()).filter((l) => l.isAvailable !== false);
-        return results.map((l) => ({
-          ...l,
-          owner: memoryStore.users.get(l.ownerId),
-          pricingTiers: Array.from(memoryStore.pricingTiers.values()).filter((t) => t.listingId === l.id),
-        }));
-      },
-      findFirst: async ({ where, with: relations }: any = {}) => {
-        const results = Array.from(memoryStore.listings.values());
-        if (results.length === 0) return null;
-        const l = results[0];
-        return {
-          ...l,
-          owner: memoryStore.users.get(l.ownerId),
-          pricingTiers: Array.from(memoryStore.pricingTiers.values()).filter((t) => t.listingId === l.id),
-        };
-      },
-    },
-    pricingTiers: {
-      findMany: async ({ where }: any = {}) => {
-        return Array.from(memoryStore.pricingTiers.values());
-      },
-      findFirst: async ({ where }: any = {}) => {
-        for (const t of memoryStore.pricingTiers.values()) return t;
-        return null;
-      },
-    },
-    users: {
-      findMany: async () => Array.from(memoryStore.users.values()),
-      findFirst: async ({ where }: any = {}) => {
-        for (const u of memoryStore.users.values()) return u;
-        return null;
-      },
-    },
-    userSubscriptions: {
-      findMany: async () => Array.from(memoryStore.userSubscriptions.values()),
-      findFirst: async ({ where }: any = {}) => {
-        for (const sub of memoryStore.userSubscriptions.values()) {
-          return sub;
-        }
-        return null;
-      },
-    },
-    bookings: {
-      findMany: async () => Array.from(memoryStore.bookings.values()),
-      findFirst: async () => {
-        for (const b of memoryStore.bookings.values()) {
-          return b;
-        }
-        return null;
-      },
-    },
-    systemLogs: {
-      findMany: async () => {
-        return Array.from(memoryStore.systemLogs.values()).sort(
-          (a, b) => b.createdAt.getTime() - a.createdAt.getTime()
-        );
-      },
-    },
-    trustGroups: {
-      findMany: async () => {
-        return Array.from(memoryStore.trustGroups.values());
-      },
-    },
+function unsupportedWhere(operation: string): (...args: any[]) => never {
+  return () => {
+    throw new Error(`db.${operation} is not supported; read the record from memoryStore by id instead.`);
   };
+}
 
-  const insertEngine = (table: any) => ({
-    values: (record: any) => {
-      const id = record.id || `rec_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
-      const fullRecord = {
-        ...record,
-        id,
-        createdAt: record.createdAt || new Date(),
-      };
-
-      if (table === schema.listings) {
-        memoryStore.listings.set(id, fullRecord);
-      } else if (table === schema.pricingTiers) {
-        memoryStore.pricingTiers.set(id, fullRecord);
-      } else if (table === schema.users) {
-        memoryStore.users.set(id, fullRecord);
-      } else if (table === schema.usageLogs) {
-        memoryStore.usageLogs.set(id, fullRecord);
-      } else if (table === schema.systemLogs) {
-        memoryStore.systemLogs.set(id, fullRecord);
-      } else if (table === schema.bookings) {
-        memoryStore.bookings.set(id, fullRecord);
-      } else if (table === schema.payments) {
-        memoryStore.payments.set(id, fullRecord);
-      } else if (table === schema.conditionLogs) {
-        memoryStore.conditionLogs.set(id, fullRecord);
-      } else if (table === schema.trustGroups) {
-        memoryStore.trustGroups.set(id, fullRecord);
-      } else if (table === schema.groupMemberships) {
-        memoryStore.groupMemberships.set(id, fullRecord);
-      } else if (table === schema.conversations) {
-        memoryStore.conversations.set(id, fullRecord);
-      } else if (table === schema.messages) {
-        memoryStore.messages.set(id, fullRecord);
-      } else if (table === schema.reviews) {
-        memoryStore.reviews.set(id, fullRecord);
-      }
-      return {
-        returning: () => [fullRecord],
-      };
+function createDbInstance() {
+  const query = {
+    listings: {
+      findMany: async () => Array.from(memoryStore.listings.values()).filter((l) => l.isAvailable !== false),
+      findFirst: unsupportedWhere('listings.findFirst'),
     },
-  });
-
-  const updateEngine = (table: any) => ({
-    set: (values: any) => ({
-      where: (cond: any) => ({
-        returning: () => [values],
-      }),
-    }),
-  });
-
-  const selectEngine = () => ({
-    from: (table: any) => ({
-      where: (condition: any) => ({
-        limit: (lim: number) => {
-          if (table === schema.users) return Array.from(memoryStore.users.values()).slice(0, lim);
-          if (table === schema.listings) return Array.from(memoryStore.listings.values()).slice(0, lim);
-          if (table === schema.pricingTiers) return Array.from(memoryStore.pricingTiers.values()).slice(0, lim);
-          if (table === schema.userSubscriptions) return Array.from(memoryStore.userSubscriptions.values()).slice(0, lim);
-          if (table === schema.bookings) return Array.from(memoryStore.bookings.values()).slice(0, lim);
-          if (table === schema.payments) return Array.from(memoryStore.payments.values()).slice(0, lim);
-          return [];
-        },
-      }),
-    }),
-  });
-
+    users: { findMany: async () => Array.from(memoryStore.users.values()), findFirst: unsupportedWhere('users.findFirst') },
+    userSubscriptions: { findFirst: unsupportedWhere('userSubscriptions.findFirst') },
+    bookings: { findFirst: unsupportedWhere('bookings.findFirst') },
+  };
   return {
-    query: queryEngine,
-    insert: insertEngine,
-    update: updateEngine,
-    select: selectEngine,
-    transaction: async <T>(callback: (tx: any) => Promise<T>): Promise<T> => {
-      // Create transactional snapshot for rollback guarantee
-      const subSnapshot = new Map(memoryStore.userSubscriptions);
-      const usageSnapshot = new Map(memoryStore.usageLogs);
-      const systemSnapshot = new Map(memoryStore.systemLogs);
-      const bookingSnapshot = new Map(memoryStore.bookings);
-      const paymentSnapshot = new Map(memoryStore.payments);
-      const conditionSnapshot = new Map(memoryStore.conditionLogs);
-      const groupSnapshot = new Map(memoryStore.trustGroups);
-      const membershipSnapshot = new Map(memoryStore.groupMemberships);
-      const convSnapshot = new Map(memoryStore.conversations);
-      const msgSnapshot = new Map(memoryStore.messages);
-      const reviewSnapshot = new Map(memoryStore.reviews);
-      const listingSnapshot = new Map(memoryStore.listings);
-      const tierSnapshot = new Map(memoryStore.pricingTiers);
-      const userSnapshot = new Map(memoryStore.users);
-
-      const txProxy = {
-        select: selectEngine,
-        query: queryEngine,
-        update: updateEngine,
-        insert: insertEngine,
-      };
-
-      try {
-        const result = await callback(txProxy);
-        return result;
-      } catch (err) {
-        // Rollback snapshot on transaction failure
-        memoryStore.userSubscriptions = subSnapshot;
-        memoryStore.usageLogs = usageSnapshot;
-        memoryStore.systemLogs = systemSnapshot;
-        memoryStore.bookings = bookingSnapshot;
-        memoryStore.payments = paymentSnapshot;
-        memoryStore.conditionLogs = conditionSnapshot;
-        memoryStore.trustGroups = groupSnapshot;
-        memoryStore.groupMemberships = membershipSnapshot;
-        memoryStore.conversations = convSnapshot;
-        memoryStore.messages = msgSnapshot;
-        memoryStore.reviews = reviewSnapshot;
-        memoryStore.listings = listingSnapshot;
-        memoryStore.pricingTiers = tierSnapshot;
-        memoryStore.users = userSnapshot;
-        throw err;
-      }
-    },
+    query,
+    select: () => ({ from: () => ({ where: unsupportedWhere('select().where') }) }),
+    update: () => ({ set: () => ({ where: unsupportedWhere('update().where') }) }),
+    transaction: async <T>(callback: (tx: any) => Promise<T>): Promise<T> => callback({ query }),
   };
 }
 
