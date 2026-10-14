@@ -37,9 +37,9 @@ function load() {
     publicAppUrl,
     /** Seed the demo neighbourhood into an empty database, and allow one-tap demo sign-in. */
     demoMode: bool(env.DEMO_MODE, !isProduction),
-    adminEmails: new Set(
-      list(env.ADMIN_EMAILS ? `${env.ADMIN_EMAILS},mraaziqp@gmail.com` : 'mraaziqp@gmail.com').map((e) => e.toLowerCase())
-    ),
+    // Only from the setting: an address written into the code is an admin anyone can
+    // become by signing up with it first (sign-up does not verify email).
+    adminEmails: new Set(list(env.ADMIN_EMAILS).map((e) => e.toLowerCase())),
     trustProxy: bool(env.TRUST_PROXY, isProduction),
     sessionTtlDays: Number(env.SESSION_TTL_DAYS || 30),
     /** Sign-in / sign-up attempts allowed per client IP per minute. */

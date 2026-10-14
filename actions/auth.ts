@@ -39,7 +39,7 @@ export interface RequestMeta {
 
 export type AuthResult = { success: true; session: AuthSession & { token: string } } | { success: false; error: string };
 
-const MIN_PASSWORD_LENGTH = 6;
+const MIN_PASSWORD_LENGTH = 8;
 const CREDENTIAL_PROVIDER = 'credential';
 
 /** Seeded users behind the one-tap demo accounts (demo mode only). */
@@ -344,8 +344,12 @@ export function setUserSuspended(userId: string, suspended: boolean, actorId: st
   return toUserModel(memoryStore.users.get(userId)!);
 }
 
-/** Ensures a designated administrator exists with the required credentials. */
-export async function ensureAdminUser(email: string, password: string, name = 'Admin'): Promise<UserModel> {
+/**
+ * The first administrator (server/index.ts, from ADMIN_BOOTSTRAP_*): made when
+ * missing; an existing account is made ADMIN, and its password replaced only
+ * when asked (resetPassword), so a restart never undoes a password change.
+ */
+export async function ensureAdminUser(email: string, password: string, name = 'Admin', opts: { resetPassword?: boolean } = {}): Promise<UserModel> {
   const cleanEmail = normalizeEmail(email);
   let user = findUserByEmail(cleanEmail);
   const now = new Date();
@@ -391,7 +395,7 @@ export async function ensureAdminUser(email: string, password: string, name = 'A
     memoryStore.users.set(user.id, { ...user, role: 'ADMIN', updatedAt: now });
     const credential = credentialFor(user.id);
     if (credential) {
-      memoryStore.accounts.set(credential.id, { ...credential, password: hash, updatedAt: now });
+      if (opts.resetPassword) memoryStore.accounts.set(credential.id, { ...credential, password: hash, updatedAt: now });
     } else {
       const accountId = newId('acct');
       memoryStore.accounts.set(accountId, {

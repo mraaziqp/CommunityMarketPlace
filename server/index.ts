@@ -20,10 +20,20 @@ async function main() {
     sendCommittedNotifications(writes);
   };
 
-  // Ensure the designated administrator account is initialized
-  await memoryStore.runExclusive(async () => {
-    await ensureAdminUser('mraaziqp@gmail.com', '114477', 'Mraaziq');
-  });
+  // The first administrator, from the server's settings (never from the code: this
+  // repository is public). Made when missing; its password is reset only when
+  // ADMIN_BOOTSTRAP_RESET=1. The address must also be in ADMIN_EMAILS.
+  const bootEmail = process.env.ADMIN_BOOTSTRAP_EMAIL?.trim();
+  const bootPassword = process.env.ADMIN_BOOTSTRAP_PASSWORD ?? '';
+  if (bootEmail && bootPassword.length >= 12) {
+    await memoryStore.runExclusive(async () => {
+      await ensureAdminUser(bootEmail, bootPassword, process.env.ADMIN_BOOTSTRAP_NAME || 'Admin', {
+        resetPassword: process.env.ADMIN_BOOTSTRAP_RESET === '1',
+      });
+    });
+  } else if (bootEmail) {
+    console.warn('[server] ADMIN_BOOTSTRAP_PASSWORD must be at least 12 characters; no admin was made');
+  }
 
   if (cfg.demoMode && memoryStore.isEmpty()) {
     await memoryStore.runExclusive(() => memoryStore.seedDemoData({ includeAdmin: true }));
