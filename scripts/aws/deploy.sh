@@ -17,7 +17,7 @@ export AWS_PAGER="" MSYS_NO_PATHCONV=1
 ENV_FILE="${ENV_FILE:-$HOME/.sharehub/production.env}"
 set -a; source "$ENV_FILE"; set +a
 : "${SERVER_IP:?Run scripts/aws/provision.sh first}" "${DATABASE_URL:?Run scripts/aws/provision.sh first}"
-KEY_FILE="$HOME/.sharehub/sharehub-prod.pem"
+KEY_FILE="${KEY_FILE:-$HOME/.sharehub/sharehub-prod.pem}"
 SSH="ssh -i $KEY_FILE -o StrictHostKeyChecking=accept-new ec2-user@$SERVER_IP"
 
 cd "$(dirname "$0")/../.."
