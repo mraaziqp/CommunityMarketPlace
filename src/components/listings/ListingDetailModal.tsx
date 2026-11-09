@@ -20,7 +20,6 @@ import {
 } from 'lucide-react';
 import { ListingModel, PricingTierModel, UserSubscriptionModel } from '../../types';
 import { formatCurrency, formatTierRate, cn } from '../../lib/utils';
-import { generateAwehChatLink } from '../../lib/awehchat';
 
 export interface ListingDetailModalProps {
   listing: ListingModel;
@@ -32,6 +31,7 @@ export interface ListingDetailModalProps {
   onBook: (listing: ListingModel, tier: PricingTierModel, start: Date, end: Date) => Promise<void>;
   onLogUsage: (subscriptionId: string, notes: string) => Promise<void>;
   onRequireSignIn: () => void;
+  onMessageHost?: (listing: ListingModel) => void;
 }
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -75,6 +75,7 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
   onBook,
   onLogUsage,
   onRequireSignIn,
+  onMessageHost,
 }) => {
   const [selectedTierId, setSelectedTierId] = useState<string>(listing.pricingTiers[0]?.id ?? '');
   const [selectedImage, setSelectedImage] = useState(0);
@@ -277,17 +278,23 @@ export const ListingDetailModal: React.FC<ListingDetailModalProps> = ({
                   </div>
                 </div>
                 {!isOwner && (
-                  <a
-                    id="chat-awehchat-detail-btn"
-                    href={generateAwehChatLink(listing.owner.id, listing.id, listing.title, { hostName: listing.owner.name.split(' ')[0] })}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white text-xs font-bold flex items-center justify-center gap-1.5 shadow-xs transition-all shrink-0"
+                  <button
+                    id="chat-message-host-detail-btn"
+                    type="button"
+                    onClick={() => {
+                      if (!currentUserId) {
+                        onRequireSignIn();
+                        return;
+                      }
+                      if (onMessageHost) {
+                        onMessageHost(listing);
+                      }
+                    }}
+                    className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 active:scale-95 text-white text-xs font-bold flex items-center justify-center gap-1.5 shadow-xs transition-all shrink-0 cursor-pointer"
                   >
-                    <MessageCircle className="w-4 h-4" />
+                    <MessageCircle className="w-4 h-4 text-emerald-400" />
                     <span>Message host</span>
-                    <ExternalLink className="w-3 h-3 text-emerald-200" />
-                  </a>
+                  </button>
                 )}
               </div>
 

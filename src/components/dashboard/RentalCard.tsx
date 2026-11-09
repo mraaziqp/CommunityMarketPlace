@@ -7,6 +7,7 @@ import {
   CreditCard,
   Star,
   Loader2,
+  XCircle,
 } from 'lucide-react';
 import { BookingModel } from '../../types';
 import { formatCurrency, cn } from '../../lib/utils';
@@ -17,6 +18,7 @@ export interface RentalCardProps {
   onPay: (b: BookingModel) => void;
   onCheckReturn: (b: BookingModel) => void;
   onReview: (b: BookingModel) => void;
+  onCancel?: (bookingId: string) => Promise<void>;
 }
 
 const dateFmt: Intl.DateTimeFormatOptions = { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' };
@@ -46,9 +48,12 @@ export const RentalCard: React.FC<RentalCardProps> = ({
   onPay,
   onCheckReturn,
   onReview,
+  onCancel,
 }) => {
   const [code, setCode] = useState('');
   const [isWorking, setIsWorking] = useState(false);
+  const [showCancelPrompt, setShowCancelPrompt] = useState(false);
+  const [isCancelling, setIsCancelling] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const chip = statusChip(booking);
   const isHost = booking.viewerRole === 'host';
@@ -67,6 +72,20 @@ export const RentalCard: React.FC<RentalCardProps> = ({
       setError(err?.message || 'That did not work. Please try again.');
     } finally {
       setIsWorking(false);
+    }
+  };
+
+  const handleCancel = async () => {
+    if (!onCancel) return;
+    setError(null);
+    setIsCancelling(true);
+    try {
+      await onCancel(booking.id);
+      setShowCancelPrompt(false);
+    } catch (err: any) {
+      setError(err?.message || 'Could not cancel booking. Please try again.');
+    } finally {
+      setIsCancelling(false);
     }
   };
 
@@ -117,6 +136,38 @@ export const RentalCard: React.FC<RentalCardProps> = ({
         </div>
       )}
 
+      {showCancelPrompt && (
+        <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-950 space-y-2.5">
+          <p className="font-semibold text-rose-900">
+            Cancel this reservation?
+          </p>
+          <p className="text-rose-800">
+            {booking.status === 'PENDING_HANDOVER'
+              ? 'Funds held in escrow will be released and scheduled for full refund.'
+              : 'Your hold on these dates will be released immediately.'}
+          </p>
+          <div className="flex items-center gap-2 pt-1">
+            <button
+              type="button"
+              disabled={isCancelling}
+              onClick={handleCancel}
+              className="px-3 py-1.5 rounded-lg bg-rose-700 hover:bg-rose-800 text-white font-bold text-xs flex items-center gap-1.5 cursor-pointer shadow-xs disabled:opacity-50"
+            >
+              {isCancelling ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <XCircle className="w-3.5 h-3.5" />}
+              Yes, cancel booking
+            </button>
+            <button
+              type="button"
+              disabled={isCancelling}
+              onClick={() => setShowCancelPrompt(false)}
+              className="px-3 py-1.5 rounded-lg bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 font-semibold text-xs cursor-pointer shadow-2xs"
+            >
+              Keep booking
+            </button>
+          </div>
+        </div>
+      )}
+
       {underReview ? (
         <div className="p-3 rounded-xl bg-rose-50/70 border border-rose-200 text-xs text-rose-900">
           {isHost
@@ -125,33 +176,64 @@ export const RentalCard: React.FC<RentalCardProps> = ({
         </div>
       ) : booking.status === 'PENDING_PAYMENT' ? (
         isHost ? (
-          <p className="p-3 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-700">
-            Waiting for {renterFirst} to pay. We'll show you the pickup code once they do.
-          </p>
+          <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-700 flex items-center justify-between gap-2">
+            <p>Waiting for {renterFirst} to pay. We'll show you the pickup code once they do.</p>
+            {onCancel && !showCancelPrompt && (
+              <button
+                type="button"
+                onClick={() => setShowCancelPrompt(true)}
+                className="text-xs text-rose-600 hover:text-rose-800 font-medium shrink-0 cursor-pointer"
+              >
+                Cancel
+              </button>
+            )}
+          </div>
         ) : (
           <div className="flex items-center justify-between gap-3 p-3 rounded-xl bg-slate-50 border border-slate-200">
             <p className="text-xs text-slate-700">Your dates are held for 30 minutes. Pay to lock them in.</p>
-            <button
-              type="button"
-              onClick={() => onPay(booking)}
-              className="px-3.5 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs flex items-center gap-1.5 cursor-pointer shadow-xs transition-colors"
-            >
-              <CreditCard className="w-3.5 h-3.5" /> Pay now
-            </button>
+            <div className="flex items-center gap-2">
+              {onCancel && !showCancelPrompt && (
+                <button
+                  type="button"
+                  onClick={() => setShowCancelPrompt(true)}
+                  className="px-3 py-2 rounded-xl bg-white hover:bg-rose-50 text-rose-700 border border-rose-200 font-semibold text-xs cursor-pointer shadow-2xs transition-colors"
+                >
+                  Cancel
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => onPay(booking)}
+                className="px-3.5 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs flex items-center gap-1.5 cursor-pointer shadow-xs transition-colors"
+              >
+                <CreditCard className="w-3.5 h-3.5" /> Pay now
+              </button>
+            </div>
           </div>
         )
       ) : booking.status === 'CANCELLED' ? (
         <p className="p-3 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-600">
-          {isHost ? 'This booking was not paid for, so the dates were released.' : 'This booking was not paid in time, so the dates were released. You can book again any time.'}
+          {isHost ? 'This booking was cancelled, so the dates were released.' : 'This booking was cancelled. You can book again any time.'}
         </p>
       ) : booking.status === 'PENDING_HANDOVER' ? (
         isHost ? (
-          <div className="p-3.5 rounded-xl bg-amber-50/80 border border-amber-200 text-xs text-amber-950 space-y-1.5">
+          <div className="p-3.5 rounded-xl bg-amber-50/80 border border-amber-200 text-xs text-amber-950 space-y-2">
             <p className="font-medium">
               {renterFirst} is collecting on {fmtDate(booking.startDate)}. Give them this code when you hand it over:
             </p>
-            <div className="p-2 bg-white rounded-lg border border-amber-300 inline-block font-mono text-base font-bold tracking-wider text-amber-900 shadow-2xs">
-              {booking.verificationCode}
+            <div className="flex items-center justify-between gap-2">
+              <div className="p-2 bg-white rounded-lg border border-amber-300 inline-block font-mono text-base font-bold tracking-wider text-amber-900 shadow-2xs">
+                {booking.verificationCode}
+              </div>
+              {onCancel && !showCancelPrompt && (
+                <button
+                  type="button"
+                  onClick={() => setShowCancelPrompt(true)}
+                  className="text-xs text-rose-600 hover:text-rose-800 font-medium hover:underline inline-flex items-center gap-1 cursor-pointer"
+                >
+                  <XCircle className="w-3.5 h-3.5" /> Cancel reservation
+                </button>
+              )}
             </div>
           </div>
         ) : (
@@ -179,6 +261,17 @@ export const RentalCard: React.FC<RentalCardProps> = ({
                 Confirm pickup
               </button>
             </div>
+            {onCancel && !showCancelPrompt && (
+              <div className="flex justify-end pt-1">
+                <button
+                  type="button"
+                  onClick={() => setShowCancelPrompt(true)}
+                  className="text-xs text-rose-600 hover:text-rose-800 font-medium hover:underline inline-flex items-center gap-1 cursor-pointer"
+                >
+                  <XCircle className="w-3.5 h-3.5" /> Cancel reservation
+                </button>
+              </div>
+            )}
           </form>
         )
       ) : booking.status === 'ACTIVE' ? (

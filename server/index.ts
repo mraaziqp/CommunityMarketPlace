@@ -23,16 +23,19 @@ async function main() {
   // The first administrator, from the server's settings (never from the code: this
   // repository is public). Made when missing; its password is reset only when
   // ADMIN_BOOTSTRAP_RESET=1. The address must also be in ADMIN_EMAILS.
-  const bootEmail = process.env.ADMIN_BOOTSTRAP_EMAIL?.trim();
-  const bootPassword = process.env.ADMIN_BOOTSTRAP_PASSWORD ?? '';
-  if (bootEmail && bootPassword.length >= 12) {
+  const bootEmail = (process.env.ADMIN_BOOTSTRAP_EMAIL || process.env.BOOTSTRAP_ADMIN_EMAIL)?.trim();
+  const bootPassword = process.env.ADMIN_BOOTSTRAP_PASSWORD || process.env.BOOTSTRAP_ADMIN_PASSWORD ?? '';
+  if (bootEmail && bootPassword) {
     await memoryStore.runExclusive(async () => {
-      await ensureAdminUser(bootEmail, bootPassword, process.env.ADMIN_BOOTSTRAP_NAME || 'Admin', {
-        resetPassword: process.env.ADMIN_BOOTSTRAP_RESET === '1',
-      });
+      await ensureAdminUser(
+        bootEmail,
+        bootPassword,
+        process.env.ADMIN_BOOTSTRAP_NAME || process.env.BOOTSTRAP_ADMIN_NAME || 'Admin',
+        { resetPassword: process.env.ADMIN_BOOTSTRAP_RESET === '1' }
+      );
     });
   } else if (bootEmail) {
-    console.warn('[server] ADMIN_BOOTSTRAP_PASSWORD must be at least 12 characters; no admin was made');
+    console.warn('[server] ADMIN_BOOTSTRAP_PASSWORD must be provided; no admin was made');
   }
 
   if (cfg.demoMode && memoryStore.isEmpty()) {

@@ -506,3 +506,163 @@ test('emails: a paid booking emails the renter and the host (with the pickup cod
   assert.ok(!rendered.html.includes('<script>'), 'email content is escaped');
   assert.ok(rendered.text.length > 20);
 });
+
+test('booking cancellation: unpaid releases hold; paid-awaiting-pickup releases escrow & queues refund', async () => {
+  const renter = client();
+  await renter.post('/api/auth/signup', { name: 'Canceller', email: 'canceller@example.com', password: 'longpassword' });
+  const listing = (await renter.get('/api/listings?q=drill')).data.listings[0];
+
+  // 1. Unpaid booking cancellation
+  const booked = await renter.post('/api/bookings', {
+    listingId: listing.id,
+    tierId: listing.pricingTiers[0].id,
+    startDate: future(10),
+    endDate: future(12),
+  });
+  assert.equal(booked.status, 200);
+  const unpaidBookingId = booked.data.booking.id;
+
+  const cancelledUnpaid = await renter.post(`/api/bookings/${unpaidBookingId}/cancel`, { reason: 'Changed mind' });
+  assert.equal(cancelledUnpaid.status, 200);
+  assert.equal(cancelledUnpaid.data.booking.status, 'CANCELLED');
+
+  // Verify dates are immediately re-bookable by another member
+  const otherMember = client();
+  await otherMember.post('/api/auth/signup', { name: 'Rebooker', email: 'rebooker@example.com', password: 'longpassword' });
+  const rebooked = await otherMember.post('/api/bookings', {
+    listingId: listing.id,
+    tierId: listing.pricingTiers[0].id,
+    startDate: future(10),
+    endDate: future(12),
+  });
+  assert.equal(rebooked.status, 200, 'calendar hold released after cancellation');
+
+  // 2. Paid booking (held in escrow) cancellation prior to pickup
+  const paidBookingRes = await renter.post('/api/bookings', {
+    listingId: listing.id,
+    tierId: listing.pricingTiers[0].id,
+    startDate: future(15),
+    endDate: future(17),
+  });
+  const { checkout, booking: paidBooking } = paidBookingRes.data;
+  await sendItn(itnFor(checkout));
+
+  assert.equal(memoryStore.bookings.get(paidBooking.id)!.status, 'PENDING_HANDOVER');
+  const paymentBefore = Array.from(memoryStore.payments.values()).find((p) => p.bookingId === paidBooking.id)!;
+  assert.equal(paymentBefore.status, 'HELD_IN_ESCROW');
+
+  // Cancel prior to pickup
+  const cancelledPaid = await renter.post(`/api/bookings/${paidBooking.id}/cancel`, { reason: 'Trip rescheduled' });
+  assert.equal(cancelledPaid.status, 200);
+  assert.equal(cancelledPaid.data.booking.status, 'CANCELLED');
+
+  // Verify escrow released and refund due
+  const paymentAfter = memoryStore.payments.get(paymentBefore.id)!;
+  assert.equal(paymentAfter.status, 'REFUNDED');
+  if (paidBooking.depositAmountInCents > 0) {
+    assert.equal(paymentAfter.depositRefundStatus, 'due');
+  }
+  assert.equal(paymentAfter.hostPayoutStatus, 'none');
+  assert.equal(paymentAfter.hostPayoutInCents, 0);
+});
+
+test('pickup verification brute-force protection: locks after 5 failed attempts', async () => {
+  const renter = client();
+  await renter.post('/api/auth/signup', { name: 'Guesser', email: 'guesser@example.com', password: 'longpassword' });
+  const listing = (await renter.get('/api/listings?q=drill')).data.listings[0];
+
+  const booked = await renter.post('/api/bookings', {
+    listingId: listing.id,
+    tierId: listing.pricingTiers[0].id,
+    startDate: future(20),
+    endDate: future(22),
+  });
+  const { checkout, booking } = booked.data;
+  await sendItn(itnFor(checkout));
+
+  const realBooking = memoryStore.bookings.get(booking.id)!;
+  assert.equal(realBooking.status, 'PENDING_HANDOVER');
+
+  // 4 incorrect attempts
+  for (let i = 1; i <= 4; i++) {
+    const res = await renter.post(`/api/bookings/${booking.id}/pickup`, { code: `WRONG-${i}` });
+    assert.equal(res.status, 400);
+    assert.ok(res.data.error.includes(`${5 - i} attempt`));
+  }
+
+  // 5th attempt locks verification
+  const fifth = await renter.post(`/api/bookings/${booking.id}/pickup`, { code: 'WRONG-5' });
+  assert.equal(fifth.status, 400);
+  assert.ok(fifth.data.error.toLowerCase().includes('locked'));
+
+  // Subsequent attempt (even with correct code) must remain locked
+  const correctAfterLock = await renter.post(`/api/bookings/${booking.id}/pickup`, { code: realBooking.verificationCode });
+  assert.equal(correctAfterLock.status, 400);
+  assert.ok(correctAfterLock.data.error.toLowerCase().includes('locked'));
+});
+
+test('in-app peer-to-peer messaging: conversations, messages, unread tracking, and participant authorization', async () => {
+  const renter = client();
+  await renter.post('/api/auth/signup', { name: 'Chat Renter', email: 'chat.renter@example.com', password: 'longpassword' });
+
+  const host = client();
+  await host.post('/api/auth/signup', { name: 'Chat Host', email: 'chat.host@example.com', password: 'longpassword' });
+
+  const outsider = client();
+  await outsider.post('/api/auth/signup', { name: 'Chat Outsider', email: 'chat.outsider@example.com', password: 'longpassword' });
+
+  // Host creates a listing
+  const listingRes = await host.post('/api/listings', {
+    title: 'DeWalt Hammer Drill',
+    description: 'Heavy duty drill in Tamboerskloof',
+    category: 'physical_item',
+    address: '42 Kloof Street',
+    city: 'Cape Town',
+    neighborhood: 'Tamboerskloof',
+    tiers: [{ name: 'Daily', type: 'daily', priceInCents: 15000 }],
+  });
+  const listingId = listingRes.data.listing.id;
+
+  // 1. Renter starts conversation with host
+  const convRes = await renter.post('/api/conversations', { listingId });
+  assert.equal(convRes.status, 200);
+  const convId = convRes.data.conversation.id;
+
+  // 2. Renter sends a message
+  const msgRes = await renter.post(`/api/conversations/${convId}/messages`, {
+    content: 'Hi! Is the drill available with masonry bits tomorrow?',
+  });
+  assert.equal(msgRes.status, 200);
+  assert.equal(msgRes.data.message.content, 'Hi! Is the drill available with masonry bits tomorrow?');
+
+  // 3. Host lists conversations: unread count must be 1
+  const hostConvs = await host.get('/api/conversations');
+  assert.equal(hostConvs.status, 200);
+  const hostThread = hostConvs.data.conversations.find((c: any) => c.id === convId);
+  assert.ok(hostThread);
+  assert.equal(hostThread.unreadCount, 1);
+
+  // 4. Host views thread and marks messages read
+  const threadRes = await host.get(`/api/conversations/${convId}`);
+  assert.equal(threadRes.status, 200);
+  assert.equal(threadRes.data.messages.length, 1);
+
+  const readRes = await host.post(`/api/conversations/${convId}/read`, {});
+  assert.equal(readRes.status, 200);
+  assert.equal(readRes.data.count, 1);
+
+  // Host sends reply
+  const replyRes = await host.post(`/api/conversations/${convId}/messages`, {
+    content: 'Yes, full 12-piece masonry set included!',
+  });
+  assert.equal(replyRes.status, 200);
+
+  // 5. Security: Outsider cannot view or send in this conversation
+  const intruderView = await outsider.get(`/api/conversations/${convId}`);
+  assert.equal(intruderView.status, 404, 'unauthorized user cannot read conversation');
+
+  const intruderSend = await outsider.post(`/api/conversations/${convId}/messages`, {
+    content: 'Spamming someone elses thread',
+  });
+  assert.equal(intruderSend.status, 400, 'unauthorized user cannot post to conversation');
+});

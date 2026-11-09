@@ -19,7 +19,14 @@ import { createListing, getListingById } from '../../actions/listings';
 import { getActivityForUser } from '../../actions/activity';
 import { createTrustGroup, getTrustGroups, getUserMemberGroupIds, joinTrustGroup } from '../../actions/groups';
 import { logFractionalUse, subscribeToListing } from '../../actions/usage';
-import { confirmHandover, createBooking } from '../../actions/bookings';
+import { confirmHandover, createBooking, cancelBooking } from '../../actions/bookings';
+import {
+  getConversationsForUser,
+  getOrCreateConversation,
+  getConversation,
+  sendMessage,
+  markMessagesAsRead,
+} from '../../actions/messaging';
 import { confirmReturn, initiateDispute } from '../../actions/returns';
 import { createReview } from '../../actions/reviews';
 import { changePassword, setUserRole, setUserSuspended, updateProfile } from '../../actions/auth';
@@ -255,6 +262,12 @@ export function appRoutes() {
     return c.json(await write(() => confirmHandover(c.req.param('id'), code, user.id)));
   });
 
+  api.post('/bookings/:id/cancel', async (c) => {
+    const user = requireUser(c);
+    const input = await body(c, z.object({ reason: z.string().max(500).optional() })).catch(() => ({ reason: undefined }));
+    return c.json(await write(() => cancelBooking(c.req.param('id'), user.id, input.reason)));
+  });
+
   const photos = z.array(z.string().max(2_000_000)).max(6).default([]);
 
   api.post('/bookings/:id/return', async (c) => {
@@ -288,6 +301,42 @@ export function appRoutes() {
     );
     const res = await write(() => createReview({ ...input, bookingId: c.req.param('id'), reviewerId: user.id }));
     return c.json({ review: res.review, newTrustScore: res.newTrustScore });
+  });
+
+  // --- In-app peer-to-peer messaging ---
+  api.get('/conversations', async (c) => {
+    const user = requireUser(c);
+    const convs = await write(() => getConversationsForUser(user.id));
+    return c.json({ conversations: convs });
+  });
+
+  api.post('/conversations', async (c) => {
+    const user = requireUser(c);
+    const input = await body(c, z.object({ listingId: z.string(), hostId: z.string().optional() }));
+    const conv = await write(() => getOrCreateConversation(input.listingId, user.id, input.hostId));
+    return c.json({ conversation: conv });
+  });
+
+  api.get('/conversations/:id', async (c) => {
+    const user = requireUser(c);
+    const detail = await write(() => getConversation(c.req.param('id'), user.id));
+    if (!detail.success || !detail.conversation) {
+      throw new ClientError('Conversation not found.', 404);
+    }
+    return c.json(detail);
+  });
+
+  api.post('/conversations/:id/messages', rateLimit('messaging', 30, 60_000), async (c) => {
+    const user = requireUser(c);
+    const input = await body(c, z.object({ content: z.string().min(1).max(2000) }));
+    const result = await write(() => sendMessage(c.req.param('id'), input.content, user.id));
+    return c.json(result);
+  });
+
+  api.post('/conversations/:id/read', async (c) => {
+    const user = requireUser(c);
+    const result = await write(() => markMessagesAsRead(c.req.param('id'), user.id));
+    return c.json(result);
   });
 
   // --- Personal dashboard ---

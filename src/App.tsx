@@ -16,6 +16,7 @@ import { EscrowPaymentModal } from './components/payments/EscrowPaymentModal';
 import { ReviewModal } from './components/reviews/ReviewModal';
 import { ReturnHandoverModal } from './components/bookings/ReturnHandoverModal';
 import { TrustGroupHub } from './components/groups/TrustGroupHub';
+import { ChatDrawer } from './components/chat/ChatDrawer';
 import { useRoute, parseMeSection, parseAdminTab } from './lib/router';
 import { api, submitCheckout } from './api/client';
 
@@ -111,6 +112,10 @@ export default function App() {
   const [selectedTrustGroupId, setSelectedTrustGroupId] = useState<string | null>(null);
   const [selectedTrustGroupName, setSelectedTrustGroupName] = useState<string | null>(null);
   const [mobileTab, setMobileTab] = useState<MobileTab>('explore');
+  const [showChatDrawer, setShowChatDrawer] = useState(false);
+  const [chatInitialListingId, setChatInitialListingId] = useState<string | null>(null);
+  const [chatInitialConversationId, setChatInitialConversationId] = useState<string | null>(null);
+  const [unreadMessagesCount, setUnreadMessagesCount] = useState(0);
   const [toast, setToast] = useState<Toast | null>(null);
 
   const showToast = useCallback((message: string, tone: Toast['tone'] = 'success') => {
@@ -165,12 +170,39 @@ export default function App() {
     setMyCircles(groups.filter((g) => g.isCurrentUserMember));
   }, [currentUser]);
 
+  const refreshUnreadMessages = useCallback(async () => {
+    if (!currentUser) {
+      setUnreadMessagesCount(0);
+      return;
+    }
+    try {
+      const convs = await api.conversations();
+      const unreadTotal = convs.reduce((acc, c) => acc + (c.unreadCount || 0), 0);
+      setUnreadMessagesCount(unreadTotal);
+    } catch {
+      // Graceful fallback
+    }
+  }, [currentUser]);
+
+  const openChat = useCallback((listingId?: string, convId?: string) => {
+    if (!currentUser) {
+      setShowAuthModal(true);
+      return;
+    }
+    setChatInitialListingId(listingId || null);
+    setChatInitialConversationId(convId || null);
+    setShowChatDrawer(true);
+  }, [currentUser]);
+
   useEffect(() => {
     if (currentUser) {
       refreshActivity();
       refreshCircles();
+      refreshUnreadMessages();
+      const timer = window.setInterval(refreshUnreadMessages, 15000);
+      return () => window.clearInterval(timer);
     }
-  }, [currentUser, refreshActivity, refreshCircles]);
+  }, [currentUser, refreshActivity, refreshCircles, refreshUnreadMessages]);
 
   // Back from PayFast: the payment notification usually lands within seconds.
   useEffect(() => {
@@ -403,7 +435,9 @@ export default function App() {
         searchQuery={searchQuery}
         onSearchChange={setSearchQuery}
         activityCount={activityBadge}
+        unreadMessagesCount={unreadMessagesCount}
         onOpenActivity={openActivity}
+        onOpenMessages={() => openChat()}
         onOpenCreateListing={openCreateListing}
         onOpenCircles={() => setShowCircles(true)}
         currentUser={currentUser}
@@ -567,13 +601,17 @@ export default function App() {
       {selectedListing && (
         <ListingDetailModal
           listing={selectedListing}
-          currentUserId={currentUser.id}
+          currentUserId={currentUser?.id ?? null}
           userSubscription={activity.subscriptions.find((s) => s.listingId === selectedListing.id)}
           onClose={() => setSelectedListing(null)}
           onJoinCoop={handleJoinCoop}
           onBook={handleBook}
           onLogUsage={handleLogUsage}
           onRequireSignIn={() => setShowAuthModal(true)}
+          onMessageHost={(listing) => {
+            setSelectedListing(null);
+            openChat(listing.id);
+          }}
         />
       )}
 
@@ -706,16 +744,35 @@ export default function App() {
 
       <AuthModal isOpen={showAuthModal} onClose={() => setShowAuthModal(false)} onAuthSuccess={handleAuthSuccess} />
 
+      {/* In-app peer-to-peer messaging drawer */}
+      <ChatDrawer
+        isOpen={showChatDrawer}
+        onClose={() => {
+          setShowChatDrawer(false);
+          setChatInitialListingId(null);
+          setChatInitialConversationId(null);
+          refreshUnreadMessages();
+        }}
+        initialConversationId={chatInitialConversationId}
+        initialListingId={chatInitialListingId}
+        currentUser={currentUser}
+        onSelectListing={(listingId) => {
+          api.getListing(listingId).then(setSelectedListing).catch(() => {});
+        }}
+      />
+
       <Footer />
 
       <MobileNav
         activeTab={isMeRoute ? 'activity' : mobileTab}
         onSelectTab={setMobileTab}
         activityCount={activityBadge}
+        unreadMessagesCount={unreadMessagesCount}
         currentUser={currentUser}
         onOpenCreateListing={openCreateListing}
         onOpenCircles={() => setShowCircles(true)}
         onOpenActivity={openActivity}
+        onOpenMessages={() => openChat()}
         onNavigateHome={() => navigate('/')}
         onNavigateDashboard={(sec) => navigate(sec && sec !== 'overview' ? `/me/${sec}` : '/me')}
       />

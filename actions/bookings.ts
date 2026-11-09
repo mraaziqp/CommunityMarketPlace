@@ -150,6 +150,8 @@ export async function createBooking(input: {
   });
 }
 
+const failedPickupAttempts = new Map<string, number>();
+
 /**
  * Pickup: the renter enters the code the host gives them when they collect
  * the item. That moves the booking from PENDING_HANDOVER to ACTIVE. The
@@ -174,14 +176,27 @@ export async function confirmHandover(
     if (booking.status === 'ACTIVE') throw new Error('Pickup has already been confirmed for this booking.');
     if (booking.status !== 'PENDING_HANDOVER') throw new Error('This booking is not waiting for pickup.');
 
+    const attempts = failedPickupAttempts.get(booking.id) || 0;
+    if (attempts >= 5) {
+      throw new Error('Too many incorrect pickup code attempts. Verification locked for security. Please contact support or your host.');
+    }
+
     const payment = Array.from(memoryStore.payments.values()).find((p) => p.bookingId === booking.id);
     if (!payment || payment.status !== 'HELD_IN_ESCROW') {
       throw new Error('Please complete payment before collecting the item.');
     }
 
     if (validated.scannedCode.trim().toUpperCase() !== booking.verificationCode.trim().toUpperCase()) {
-      throw new Error("That code doesn't match. Please check it with your host.");
+      const nextAttempts = attempts + 1;
+      failedPickupAttempts.set(booking.id, nextAttempts);
+      const remaining = 5 - nextAttempts;
+      if (remaining <= 0) {
+        throw new Error('Too many incorrect pickup code attempts. Verification locked for security.');
+      }
+      throw new Error(`That code doesn't match. Please check it with your host. (${remaining} attempt${remaining === 1 ? '' : 's'} remaining)`);
     }
+
+    failedPickupAttempts.delete(booking.id);
 
     const now = new Date();
     const updated: Booking = {
@@ -204,7 +219,104 @@ export async function confirmHandover(
     };
     memoryStore.systemLogs.set(log.id, log);
 
-
     return { success: true as const, booking: toSummary(updated) };
+  });
+}
+
+/**
+ * Self-service cancellation: Renter, host, or admin can cancel a booking
+ * prior to item pickup. If payment was held in escrow, funds are released
+ * and scheduled for refund.
+ */
+export async function cancelBooking(
+  bookingId: string,
+  userId: string,
+  reason?: string
+): Promise<{ success: true; booking: BookingSummary }> {
+  return await db.transaction(async () => {
+    const booking = memoryStore.bookings.get(bookingId);
+    if (!booking) {
+      throw new Error("We couldn't find that booking.");
+    }
+
+    const user = memoryStore.users.get(userId);
+    const listing = memoryStore.listings.get(booking.listingId);
+    const isRenter = booking.renterId === userId;
+    const isHost = !!listing && listing.ownerId === userId;
+    const isAdmin = user?.role === 'ADMIN';
+
+    if (!isRenter && !isHost && !isAdmin) {
+      throw new Error("You don't have permission to cancel this booking.");
+    }
+
+    if (booking.status === 'CANCELLED') {
+      throw new Error('This booking has already been cancelled.');
+    }
+    if (booking.status === 'COMPLETED') {
+      throw new Error('This booking is already completed and cannot be cancelled.');
+    }
+    if (booking.status === 'ACTIVE') {
+      throw new Error('This item has already been collected. Please use return check-in or dispute review.');
+    }
+
+    const now = new Date();
+    const updatedBooking: Booking = {
+      ...booking,
+      status: 'CANCELLED',
+      updatedAt: now,
+    };
+    memoryStore.bookings.set(booking.id, updatedBooking);
+
+    // If payment was made and held in escrow, refund renter
+    const payment = Array.from(memoryStore.payments.values()).find((p) => p.bookingId === booking.id);
+    if (payment) {
+      if (payment.status === 'HELD_IN_ESCROW') {
+        memoryStore.payments.set(payment.id, {
+          ...payment,
+          status: 'REFUNDED',
+          depositRefundStatus: booking.depositAmountInCents > 0 ? 'due' : 'none',
+          hostPayoutStatus: 'none',
+          hostPayoutInCents: 0,
+          updatedAt: now,
+        });
+
+        const refundLog: SystemLog = {
+          id: newId('sys_log'),
+          eventType: 'PAYMENT_REFUNDED',
+          userId,
+          targetId: payment.id,
+          metadata: {
+            bookingId: booking.id,
+            reason: reason || 'Booking cancelled prior to handover',
+            refundAmountInCents: payment.amount,
+            cancelledBy: isRenter ? 'renter' : isHost ? 'host' : 'admin',
+          },
+          createdAt: now,
+        };
+        memoryStore.systemLogs.set(refundLog.id, refundLog);
+      } else if (payment.status === 'PENDING') {
+        memoryStore.payments.set(payment.id, {
+          ...payment,
+          status: 'REFUNDED',
+          updatedAt: now,
+        });
+
+        const failLog: SystemLog = {
+          id: newId('sys_log'),
+          eventType: 'PAYMENT_FAILED',
+          userId,
+          targetId: payment.id,
+          metadata: {
+            bookingId: booking.id,
+            reason: reason || 'Booking checkout abandoned/cancelled',
+            cancelledBy: isRenter ? 'renter' : isHost ? 'host' : 'admin',
+          },
+          createdAt: now,
+        };
+        memoryStore.systemLogs.set(failLog.id, failLog);
+      }
+    }
+
+    return { success: true as const, booking: toSummary(updatedBooking) };
   });
 }

@@ -2,13 +2,14 @@ import React from 'react';
 import { Search, Zap, PlusCircle, Clock, LayoutDashboard, MessageCircle, Users } from 'lucide-react';
 import { UserModel, UserRole } from '../../types';
 import { UserMenu } from '../auth/UserMenu';
-import { getAwehChatPortalUrl } from '../../lib/awehchat';
 
 export interface NavbarProps {
   searchQuery: string;
   onSearchChange: (query: string) => void;
   activityCount: number;
+  unreadMessagesCount?: number;
   onOpenActivity: () => void;
+  onOpenMessages?: () => void;
   onOpenCreateListing: () => void;
   onOpenCircles: () => void;
   currentUser: UserModel | null;
@@ -27,7 +28,9 @@ export const Navbar: React.FC<NavbarProps> = ({
   searchQuery,
   onSearchChange,
   activityCount,
+  unreadMessagesCount = 0,
   onOpenActivity,
+  onOpenMessages,
   onOpenCreateListing,
   onOpenCircles,
   currentUser,
@@ -106,17 +109,21 @@ export const Navbar: React.FC<NavbarProps> = ({
               <span>Circles</span>
             </button>
 
-            <a
-              id="open-awehchat-nav-btn"
-              href={getAwehChatPortalUrl()}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="hidden md:inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-700 bg-white hover:bg-slate-50 rounded-xl border border-slate-200 shadow-2xs transition-colors cursor-pointer"
-              title="Opens AwehChat in a new tab"
+            <button
+              id="open-messages-nav-btn"
+              type="button"
+              onClick={onOpenMessages}
+              className="hidden md:inline-flex relative items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-700 bg-white hover:bg-slate-50 rounded-xl border border-slate-200 shadow-2xs transition-colors cursor-pointer"
+              title="Open community messages"
             >
               <MessageCircle className="w-3.5 h-3.5 text-emerald-600" />
               <span>Messages</span>
-            </a>
+              {unreadMessagesCount > 0 && (
+                <span className="min-w-4.5 h-4.5 px-1 rounded-full bg-emerald-600 text-white text-[10px] flex items-center justify-center font-bold">
+                  {unreadMessagesCount}
+                </span>
+              )}
+            </button>
 
             {currentUser && (
               <button

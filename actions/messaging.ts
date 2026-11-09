@@ -96,30 +96,39 @@ export async function getConversationsForUser(
  */
 export async function getOrCreateConversation(
   listingId: string,
-  renterId: string = 'usr_me',
-  hostId: string = 'usr_host_marcus'
+  renterId: string,
+  hostId?: string
 ): Promise<ConversationModel> {
+  const listing = memoryStore.listings.get(listingId);
+  if (!listing) {
+    throw new Error('Listing not found');
+  }
+
+  const effectiveHostId = hostId || listing.ownerId;
+  if (renterId === effectiveHostId) {
+    throw new Error('You cannot start a conversation with yourself.');
+  }
+
   // Check if thread already exists
   for (const conv of memoryStore.conversations.values()) {
     if (
       conv.listingId === listingId &&
-      ((conv.renterId === renterId && conv.hostId === hostId) ||
-        (conv.renterId === hostId && conv.hostId === renterId))
+      ((conv.renterId === renterId && conv.hostId === effectiveHostId) ||
+        (conv.renterId === effectiveHostId && conv.hostId === renterId))
     ) {
       const renter = memoryStore.users.get(conv.renterId);
       const host = memoryStore.users.get(conv.hostId);
-      const listing = memoryStore.listings.get(conv.listingId);
 
       return {
         id: conv.id,
         listingId: conv.listingId,
-        listingTitle: listing?.title || 'Shared Community Asset',
-        listingImage: listing?.images?.[0] || 'https://images.unsplash.com/photo-1581147036324-c17ac41dfa6c?w=400&auto=format&fit=crop&q=80',
+        listingTitle: listing.title || 'Shared Community Asset',
+        listingImage: listing.images?.[0] || '',
         renterId: conv.renterId,
-        renterName: renter?.name || 'Alex Rivera',
+        renterName: renter?.name || 'Renter',
         renterImage: renter?.image || '',
         hostId: conv.hostId,
-        hostName: host?.name || 'Marcus Thorne',
+        hostName: host?.name || 'Host',
         hostImage: host?.image || '',
         lastMessageAt: conv.lastMessageAt.toISOString(),
         createdAt: conv.createdAt.toISOString(),
@@ -135,7 +144,7 @@ export async function getOrCreateConversation(
     id: newConvId,
     listingId,
     renterId,
-    hostId,
+    hostId: effectiveHostId,
     lastMessageAt: now,
     createdAt: now,
     updatedAt: now,
@@ -144,19 +153,18 @@ export async function getOrCreateConversation(
   memoryStore.conversations.set(newConvId, newConv);
 
   const renter = memoryStore.users.get(renterId);
-  const host = memoryStore.users.get(hostId);
-  const listing = memoryStore.listings.get(listingId);
+  const host = memoryStore.users.get(effectiveHostId);
 
   return {
     id: newConv.id,
     listingId: newConv.listingId,
-    listingTitle: listing?.title || 'Shared Community Asset',
-    listingImage: listing?.images?.[0] || 'https://images.unsplash.com/photo-1581147036324-c17ac41dfa6c?w=400&auto=format&fit=crop&q=80',
+    listingTitle: listing.title || 'Shared Community Asset',
+    listingImage: listing.images?.[0] || '',
     renterId: newConv.renterId,
-    renterName: renter?.name || 'Alex Rivera',
+    renterName: renter?.name || 'Renter',
     renterImage: renter?.image || '',
     hostId: newConv.hostId,
-    hostName: host?.name || 'Marcus Thorne',
+    hostName: host?.name || 'Host',
     hostImage: host?.image || '',
     lastMessageAt: now.toISOString(),
     createdAt: now.toISOString(),
@@ -165,14 +173,24 @@ export async function getOrCreateConversation(
 
 /**
  * Server Action: Get Conversation Details & Messages
- * Used by the client polling loop (every 3 seconds) for responsive chat
+ * Used by the client polling loop for responsive chat
  */
 export async function getConversation(
   conversationId: string,
-  currentUserId: string = 'usr_me'
+  currentUserId: string
 ): Promise<ConversationDetailResult> {
   const conv = memoryStore.conversations.get(conversationId);
   if (!conv) {
+    return { success: false, conversation: null, messages: [] };
+  }
+
+  const currentUser = memoryStore.users.get(currentUserId);
+  const isParticipant =
+    conv.renterId === currentUserId ||
+    conv.hostId === currentUserId ||
+    currentUser?.role === 'ADMIN';
+
+  if (!isParticipant) {
     return { success: false, conversation: null, messages: [] };
   }
 
@@ -210,13 +228,13 @@ export async function getConversation(
     id: conv.id,
     listingId: conv.listingId,
     listingTitle: listing?.title || 'Shared Community Asset',
-    listingImage: listing?.images?.[0] || 'https://images.unsplash.com/photo-1581147036324-c17ac41dfa6c?w=400&auto=format&fit=crop&q=80',
+    listingImage: listing?.images?.[0] || '',
     listingPriceInCents: (listing as any)?.dailyRateInCents || 15000,
     renterId: conv.renterId,
-    renterName: renter?.name || 'Alex Rivera',
+    renterName: renter?.name || 'Renter',
     renterImage: renter?.image || '',
     hostId: conv.hostId,
-    hostName: host?.name || 'Marcus Thorne',
+    hostName: host?.name || 'Host',
     hostImage: host?.image || '',
     lastMessage: messagesList[messagesList.length - 1]?.content || '',
     lastMessageAt: conv.lastMessageAt ? conv.lastMessageAt.toISOString() : conv.createdAt.toISOString(),
@@ -237,7 +255,7 @@ export async function getConversation(
 export async function sendMessage(
   conversationId: string,
   content: string,
-  senderId: string = 'usr_me'
+  senderId: string
 ): Promise<SendMessageResult> {
   if (!conversationId) {
     throw new Error('Invalid parameter: conversationId is required');
@@ -250,6 +268,16 @@ export async function sendMessage(
   const conv = memoryStore.conversations.get(conversationId);
   if (!conv) {
     throw new Error(`Conversation '${conversationId}' not found`);
+  }
+
+  const currentUser = memoryStore.users.get(senderId);
+  const isParticipant =
+    conv.renterId === senderId ||
+    conv.hostId === senderId ||
+    currentUser?.role === 'ADMIN';
+
+  if (!isParticipant) {
+    throw new Error('You are not authorized to send messages in this conversation.');
   }
 
   const msgId = `msg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
@@ -326,8 +354,23 @@ export async function sendMessage(
  */
 export async function markMessagesAsRead(
   conversationId: string,
-  userId: string = 'usr_me'
+  userId: string
 ): Promise<{ success: boolean; count: number }> {
+  const conv = memoryStore.conversations.get(conversationId);
+  if (!conv) {
+    return { success: false, count: 0 };
+  }
+
+  const currentUser = memoryStore.users.get(userId);
+  const isParticipant =
+    conv.renterId === userId ||
+    conv.hostId === userId ||
+    currentUser?.role === 'ADMIN';
+
+  if (!isParticipant) {
+    return { success: false, count: 0 };
+  }
+
   let count = 0;
   const now = new Date();
 

@@ -120,6 +120,13 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
     showToast('Pickup confirmed! Enjoy your rental.');
   };
 
+  const handleCancelBooking = async (bookingId: string) => {
+    await api.cancelBooking(bookingId);
+    await refreshActivity();
+    await loadData();
+    showToast('Reservation cancelled.');
+  };
+
   const handleLogUsage = async (subscriptionId: string, notes: string) => {
     const result = await api.logUsage(subscriptionId, notes);
     await refreshActivity();
@@ -358,6 +365,7 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
                       onPay={onPay}
                       onCheckReturn={onCheckReturn}
                       onReview={onReview}
+                      onCancel={handleCancelBooking}
                     />
                   ))}
                 </div>

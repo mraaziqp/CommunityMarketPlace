@@ -1,7 +1,6 @@
 import React from 'react';
 import { Compass, Users, Clock, MessageCircle, PlusCircle } from 'lucide-react';
 import { UserModel } from '../../types';
-import { getAwehChatPortalUrl } from '../../lib/awehchat';
 import { cn } from '../../lib/utils';
 
 export type MobileTab = 'explore' | 'circles' | 'activity' | 'messages' | 'share';
@@ -10,10 +9,12 @@ export interface MobileNavProps {
   activeTab?: MobileTab;
   onSelectTab: (tab: MobileTab) => void;
   activityCount: number;
+  unreadMessagesCount?: number;
   currentUser: UserModel | null;
   onOpenCreateListing: () => void;
   onOpenCircles: () => void;
   onOpenActivity: () => void;
+  onOpenMessages?: () => void;
   onNavigateHome?: () => void;
   onNavigateDashboard?: (section?: string) => void;
 }
@@ -26,10 +27,12 @@ export const MobileNav: React.FC<MobileNavProps> = ({
   activeTab = 'explore',
   onSelectTab,
   activityCount,
+  unreadMessagesCount = 0,
   currentUser,
   onOpenCreateListing,
   onOpenCircles,
   onOpenActivity,
+  onOpenMessages,
   onNavigateHome,
   onNavigateDashboard,
 }) => {
@@ -112,17 +115,25 @@ export const MobileNav: React.FC<MobileNavProps> = ({
           <span className="text-[10px] mt-1 tracking-tight">Activity</span>
         </button>
 
-        <a
+        <button
           id="mobile-nav-messages-btn"
-          href={getAwehChatPortalUrl()}
-          target="_blank"
-          rel="noopener noreferrer"
-          onClick={() => onSelectTab('messages')}
-          className="flex flex-col items-center justify-center py-1 px-1 rounded-xl transition-all cursor-pointer select-none text-slate-500 hover:text-emerald-700"
+          type="button"
+          onClick={() => {
+            onSelectTab('messages');
+            if (onOpenMessages) onOpenMessages();
+          }}
+          className={tabClass('messages', 'text-emerald-700')}
         >
-          <MessageCircle className="w-5 h-5 text-emerald-600" />
+          <div className="relative">
+            <MessageCircle className={cn('w-5 h-5 transition-transform', activeTab === 'messages' && 'scale-110')} />
+            {unreadMessagesCount > 0 && (
+              <span className="absolute -top-1.5 -right-2 px-1 min-w-4 h-4 rounded-full bg-emerald-600 text-white text-[9px] font-bold flex items-center justify-center ring-2 ring-white">
+                {unreadMessagesCount}
+              </span>
+            )}
+          </div>
           <span className="text-[10px] mt-1 tracking-tight">Messages</span>
-        </a>
+        </button>
       </div>
     </nav>
   );

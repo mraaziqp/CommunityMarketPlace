@@ -1,8 +1,10 @@
 import type {
   AdminAnalyticsReport,
+  ConversationModel,
   ItemConditionStatus,
   ListingModel,
   MemberActivity,
+  MessageModel,
   ReviewModel,
   SearchResultModel,
   TrustGroupModel,
@@ -206,6 +208,8 @@ export const api = {
   createBooking: (input: { listingId: string; tierId: string; startDate: string; endDate: string }) =>
     post<{ booking: { id: string }; checkout: CheckoutForm }>('/bookings', input),
   bookingCheckout: (id: string) => post<{ checkout: CheckoutForm }>(`/bookings/${id}/checkout`).then((r) => r.checkout),
+  cancelBooking: (id: string, reason?: string) =>
+    post<{ booking: { id: string; status: string } }>(`/bookings/${id}/cancel`, { reason }),
   confirmPickup: (id: string, code: string) => post(`/bookings/${id}/pickup`, { code }),
   confirmReturn: (id: string, condition: Exclude<ItemConditionStatus, 'DAMAGED'>, notes: string, photos: string[]) =>
     post(`/bookings/${id}/return`, { condition, notes, photos }),
@@ -214,6 +218,17 @@ export const api = {
     id: string,
     input: { rating: number; comment: string; cleanlinessRating?: number; communicationRating?: number; accuracyRating?: number }
   ) => post<{ review: ReviewModel; newTrustScore: number }>(`/bookings/${id}/review`, input),
+
+  // In-app messaging
+  conversations: () => get<{ conversations: ConversationModel[] }>('/conversations').then((r) => r.conversations),
+  startConversation: (listingId: string, hostId?: string) =>
+    post<{ conversation: ConversationModel }>('/conversations', { listingId, hostId }).then((r) => r.conversation),
+  conversation: (id: string) =>
+    get<{ conversation: ConversationModel; messages: MessageModel[] }>(`/conversations/${encodeURIComponent(id)}`),
+  sendMessage: (id: string, content: string) =>
+    post<{ message: MessageModel }>(`/conversations/${encodeURIComponent(id)}/messages`, { content }).then((r) => r.message),
+  markMessagesRead: (id: string) =>
+    post<{ count: number }>(`/conversations/${encodeURIComponent(id)}/read`, {}).then((r) => r.count),
 
   // Personal dashboard
   dashboard: () => get<MemberDashboard>('/me/dashboard'),
